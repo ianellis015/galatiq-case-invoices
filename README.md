@@ -71,7 +71,7 @@ return to a known stock position.
 uv run pytest
 ```
 
-Expected: `46 passed`. The suite uses temporary databases and never touches
+Expected: `84 passed`. The suite uses temporary databases and never touches
 `var/invoices.db`.
 
 ### Inspect the database
@@ -97,6 +97,7 @@ rm var/invoices.db && uv run python -m galatiq.store.seed
 src/galatiq/
 ├── config.py          paths and environment resolution
 ├── money.py           exact money handling (Decimal ↔ integer cents)
+├── models.py          the shapes passed between stages
 └── store/
     ├── schema.sql     inventory + ledger tables
     ├── db.py          connections and schema creation
@@ -120,6 +121,7 @@ var/                   runtime database (gitignored, regenerated)
 | Re-runnable seed | `INSERT OR REPLACE`, so stock always returns to a known position |
 | Payment idempotency | `UNIQUE` on `invoice_number` — re-running a batch cannot pay the same invoice twice |
 | Exact money handling | `Decimal` in memory, integer cents on disk, `float` rejected at the boundary |
+| Data shapes | `Invoice`, `LineItem`, `Finding`, `ApprovalDecision`, `PaymentResult` — the objects passed between stages, and the schema handed to the LLM for structured output |
 
 **Not yet implemented**
 
@@ -148,3 +150,10 @@ plus seed data, so batch runs are order-independent and repeatable.
 **No hand-rolled audit table.** LangGraph's SQLite checkpointer will own its own
 tables in a separate database file; a second audit store alongside it would give two
 sources of truth that can disagree.
+
+**The models validate shape, not truth.** An `Invoice` has to be able to hold a
+*broken* invoice faithfully — a negative quantity, an empty vendor, a due date of
+`"yesterday"`, a stated total that disagrees with its own line items. The corpus
+contains all of those. If the schema rejected them, extraction would crash and the
+reviewer would learn nothing; the product is a reasoned rejection, not a stack trace.
+Judging whether an invoice is correct is the checks' job.
