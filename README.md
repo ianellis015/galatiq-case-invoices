@@ -25,7 +25,19 @@ threshold, and never decides to release a payment.
 Nothing needs to be running. There is no server, no daemon, and no database to
 install — the database is a local SQLite file created by the seed script below.
 
-No API key is required at this stage; nothing implemented so far calls an LLM.
+### API key
+
+Create a `.env` in the project root:
+
+```bash
+XAI_API_KEY=xai-...
+```
+
+That is the whole file. The endpoint (`https://api.x.ai/v1`) and model (`grok-4.5`)
+are adapter defaults, overridable via `XAI_BASE_URL` and `XAI_MODEL` if needed.
+
+The test suite needs no key and makes no network calls — it injects a test double in
+place of the API client.
 
 ### Install
 
@@ -71,7 +83,7 @@ return to a known stock position.
 uv run pytest
 ```
 
-Expected: `199 passed`. The suite uses temporary databases and never touches
+Expected: `238 passed`. The suite uses temporary databases and never touches
 `var/invoices.db`.
 
 ### Inspect the database
@@ -99,6 +111,7 @@ src/galatiq/
 ├── money.py           exact money handling (Decimal ↔ integer cents)
 ├── models.py          the shapes passed between stages
 ├── loaders/           reading any document off disk, in any format
+├── llm/               the typed interface every agent calls through
 └── store/
     ├── schema.sql     inventory + ledger tables
     ├── db.py          connections and schema creation
@@ -125,6 +138,7 @@ var/                   runtime database (gitignored, regenerated)
 | Exact money handling | `Decimal` in memory, integer cents on disk, `float` rejected at the boundary |
 | Data shapes | `Invoice`, `LineItem`, `Finding`, `ApprovalDecision`, `PaymentResult` — the objects passed between stages, and the schema handed to the LLM for structured output |
 | Format loaders | Any document that decodes to text, whatever its extension. Dedicated structural parsers for txt, pdf, json, xml and csv; everything else falls back to text. Directory and glob discovery for batch mode |
+| LLM provider layer | One typed interface every agent calls through — a pydantic model in, a validated instance out. Grok via the OpenAI-compatible endpoint, with strict structured output and bounded transport retries |
 
 **Not yet implemented**
 
@@ -187,6 +201,24 @@ labels (`INVOCE`, `Vndr`), and inconsistent invoice numbers (`INV 1012` against
 to say needs the whole document in view — that is the extractor's judgement, and one
 the critic can question. A loader that quietly fixed them would destroy the evidence
 and silently rewrite a document the system moves money against.
+
+**Model output is typed or it is an error.** Every agent calls one method: a
+conversation plus a pydantic model in, a validated instance of that model out. No
+agent anywhere parses free-form text out of a response. The schema is sent with
+`strict: true`, so the provider enforces the shape rather than suggesting it, and
+anything that still fails validation raises an error carrying the specific field
+message — which is what makes a retry a correction rather than a re-roll.
+
+**The LLM layer takes no LangChain or LangGraph dependency.** Agents are plain
+functions that can be called directly or from a graph node. Keeping the raw client
+means the structured-output path and its validation errors stay ours to shape, and
+those errors are what the self-correction loops attach to.
+
+**Amounts are transcribed, not interpreted.** Money fields are strings in the schema
+handed to the model, so `$3,500.O0` comes back as those characters and the OCR damage
+stays visible. A numeric field would invite the model to decide what the number
+probably was, and would reintroduce float error at the one boundary the rest of the
+system is built to keep it out of.
 
 **A parser that knows two shapes says so rather than guessing at a third.** A CSV whose
 columns are all named differently parses mechanically into a tidy dict containing no

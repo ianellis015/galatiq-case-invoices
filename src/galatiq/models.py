@@ -37,7 +37,7 @@ from decimal import Decimal
 from enum import StrEnum
 from typing import Annotated, Any
 
-from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, WithJsonSchema
 
 from galatiq.money import parse_money
 
@@ -82,12 +82,32 @@ def _to_money_or_none(value: Any) -> Decimal | None:
 
 # Required and optional money fields. Same guarantee either way: Decimal or nothing,
 # never a float.
-Money = Annotated[Decimal, BeforeValidator(_to_money)]
-OptionalMoney = Annotated[Decimal | None, BeforeValidator(_to_money_or_none)]
+#
+# `WithJsonSchema` pins these to strings in the generated JSON schema, which is what
+# the LLM is handed as its output contract. Two reasons that matters. Pydantic's
+# default schema for Decimal is a union of number, a pattern-constrained string, and
+# null -- and `pattern` is not a keyword strict structured output accepts. More
+# importantly, I want the model *transcribing* an amount, not interpreting it:
+# "$3,500.O0" should come back as those characters so the OCR damage is visible,
+# rather than as a number the model decided it probably meant.
+Money = Annotated[
+    Decimal,
+    BeforeValidator(_to_money),
+    WithJsonSchema({"type": "string"}),
+]
+OptionalMoney = Annotated[
+    Decimal | None,
+    BeforeValidator(_to_money_or_none),
+    WithJsonSchema({"type": ["string", "null"]}),
+]
 
 # A tax rate is not money, but it has the same float problem — 0.07 as a float is not
 # 0.07 — so it goes through the same conversion.
-OptionalRate = Annotated[Decimal | None, BeforeValidator(_to_money_or_none)]
+OptionalRate = Annotated[
+    Decimal | None,
+    BeforeValidator(_to_money_or_none),
+    WithJsonSchema({"type": ["string", "null"]}),
+]
 
 
 # ---------------------------------------------------------------------------

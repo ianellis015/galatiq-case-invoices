@@ -29,6 +29,29 @@ VAR_DIR = PROJECT_ROOT / "var"
 DB_PATH = Path(os.environ.get("INVOICE_DB_PATH", VAR_DIR / "invoices.db"))
 
 
+# --- LLM ---------------------------------------------------------------------
+#
+# Base URL and model are adapter constants rather than deployment config -- they only
+# live here so a one-off override does not require editing code. The minimum .env is
+# still a single line: the key.
+#
+# The brief's `from xai import Grok` against https://grok.x.ai does not describe a
+# real SDK or a real endpoint. The working integration is the OpenAI client pointed
+# at the address below.
+XAI_API_KEY = os.environ.get("XAI_API_KEY", "")
+XAI_BASE_URL = os.environ.get("XAI_BASE_URL", "https://api.x.ai/v1")
+XAI_MODEL = os.environ.get("XAI_MODEL", "grok-4.5")
+
+# Zero by default. Extraction and validation are transcription tasks, not creative
+# ones -- the same document should produce the same reading twice, and a system that
+# moves money has no use for variety.
+LLM_TEMPERATURE = float(os.environ.get("LLM_TEMPERATURE", "0.0"))
+
+# Transport-level retries only: a dropped connection or a rate limit. Distinct from
+# the extraction retry loop, which handles a model that misread a document.
+LLM_MAX_RETRIES = int(os.environ.get("LLM_MAX_RETRIES", "3"))
+
+
 def ensure_var_dir(path: Path | None = None) -> Path:
     """Create the parent directory for a database file if it does not exist.
 
