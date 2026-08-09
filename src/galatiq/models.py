@@ -151,6 +151,12 @@ class FindingCode(StrEnum):
     FRAUD_SIGNAL = "FRAUD_SIGNAL"              # urgency language, wire request
     PROMPT_INJECTION = "PROMPT_INJECTION"      # document text attempting to instruct
 
+    # Ingestion
+    UNREADABLE_DOCUMENT = "UNREADABLE_DOCUMENT"    # binary, or a PDF with no text layer
+    UNSUPPORTED_FORMAT = "UNSUPPORTED_FORMAT"      # unknown extension, read as text anyway
+    HINT_DISAGREEMENT = "HINT_DISAGREEMENT"        # deterministic parse and model disagree
+    EXTRACTION_UNCERTAIN = "EXTRACTION_UNCERTAIN"  # model flagged low confidence
+
     # Pipeline health
     CHECK_FAILED = "CHECK_FAILED"              # a check raised; pipeline continues
     NEEDS_HUMAN_REVIEW = "NEEDS_HUMAN_REVIEW"  # retry budget exhausted
@@ -192,9 +198,17 @@ class LineItem(BaseModel):
 
     # No ge=0 constraint. INV-1009 has quantity -5, and I need to store that in order
     # to report it.
-    quantity: int
+    #
+    # Nullable for the same reason dates are: an arbitrary invoice may state a
+    # quantity I cannot turn into an integer -- "a dozen", "N/A", "see attached".
+    # `quantity_raw` keeps whatever the document said, so a missing quantity becomes
+    # a DATA_INTEGRITY finding quoting the source rather than an extraction crash.
+    quantity: int | None = None
+    quantity_raw: str | None = None
 
-    unit_price: Money
+    # Nullable because a line stating only an extended amount has no unit price to
+    # give. check_math reconciles whichever of the three numbers are present.
+    unit_price: OptionalMoney = None
 
     # Some documents state a per-line amount as well as a unit price (INV-1013 does).
     # I keep it as stated rather than recomputing, so check_math has both numbers to
@@ -220,7 +234,12 @@ class Invoice(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     # --- identity ---
-    invoice_number: str
+    #
+    # Nullable. A document I cannot find an invoice number in still has to reach a
+    # decision -- as a DATA_INTEGRITY rejection naming what was missing, not as an
+    # exception. Requiring it here would mean the least parseable documents, which
+    # are exactly the ones a human most needs told about, are the ones that crash.
+    invoice_number: str | None = None
 
     # "R1" on invoice_1004_revised. The supersede rule -- a revision replaces its
     # original if unpaid, and is held for review if already paid -- lives in the
@@ -276,6 +295,13 @@ class Invoice(BaseModel):
     # invoice" is not a specific enough answer.
     source_path: str | None = None
     source_format: str | None = None
+
+    # Source fields I recognised but do not model. An arbitrary invoice may carry a
+    # PO number, a shipping line, a department code -- none of which map onto a field
+    # above. Dropping them silently would mean a human reading the audit trail cannot
+    # see what the system saw and ignored, which is the same argument as `raw_name`
+    # and `Finding.evidence`.
+    extra: dict[str, Any] = Field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
