@@ -392,3 +392,86 @@ class TestSerialization:
         )
         restored = ApprovalDecision.model_validate_json(original.model_dump_json())
         assert restored == original
+
+
+class TestArbitraryInvoices:
+    """Presence is what varies across invoices nobody anticipated.
+
+    The models were permissive about values and strict about presence, which is our
+    own principle applied inconsistently: for the corpus, presence is reliable; for an
+    arbitrary document it is exactly the thing that is missing. A required field turns
+    the least parseable documents -- the ones a human most needs told about -- into
+    the ones that crash.
+    """
+
+    def test_invoice_without_a_number_constructs(self):
+        """A scanned image, a truncated file, a document in an unfamiliar layout.
+
+        This has to reach a decision as a DATA_INTEGRITY rejection naming what was
+        missing, not as an exception.
+        """
+        invoice = Invoice(vendor="Unknown Vendor Ltd.", total="500.00")
+
+        assert invoice.invoice_number is None
+        assert invoice.total == Decimal("500.00")
+
+    def test_line_item_without_quantity_or_price_constructs(self):
+        item = LineItem(raw_name="WidgetA")
+
+        assert item.quantity is None
+        assert item.unit_price is None
+
+    def test_unparseable_quantity_is_preserved_raw(self):
+        """"a dozen" is not an int, and discarding it loses the evidence a
+        DATA_INTEGRITY finding would quote."""
+        item = LineItem(raw_name="WidgetA", quantity=None, quantity_raw="a dozen")
+
+        assert item.quantity is None
+        assert item.quantity_raw == "a dozen"
+
+    def test_line_stating_only_an_extended_amount(self):
+        """No unit price to give. check_math reconciles whichever numbers exist."""
+        item = LineItem(raw_name="Consulting", stated_amount="1200.00")
+
+        assert item.unit_price is None
+        assert item.stated_amount == Decimal("1200.00")
+
+    def test_unmapped_source_fields_are_preserved(self):
+        """A PO number, a shipping line, a department code -- none map onto a
+        modelled field. Dropping them silently means a human reading the audit trail
+        cannot see what the system saw and ignored.
+        """
+        invoice = Invoice(
+            invoice_number="INV-9001",
+            extra={"po_number": "PO-20260115", "department": "Facilities"},
+        )
+
+        assert invoice.extra["po_number"] == "PO-20260115"
+
+    def test_extra_defaults_to_empty(self):
+        assert Invoice(invoice_number="INV-1001").extra == {}
+
+    def test_an_almost_empty_invoice_still_constructs(self):
+        """The floor: whatever was readable, nothing else.
+
+        Every field below is missing, and none of that is an error -- it is a set of
+        findings waiting to be raised.
+        """
+        invoice = Invoice(source_path="data/adversarial/invoice_A002.bin")
+
+        assert invoice.invoice_number is None
+        assert invoice.vendor == ""
+        assert invoice.line_items == []
+        assert invoice.total is None
+
+    def test_ingestion_finding_codes_exist(self):
+        """Load-time problems report through the same channel as validation ones."""
+        for code in (
+            FindingCode.UNREADABLE_DOCUMENT,
+            FindingCode.UNSUPPORTED_FORMAT,
+            FindingCode.HINT_DISAGREEMENT,
+            FindingCode.EXTRACTION_UNCERTAIN,
+        ):
+            assert Finding(
+                code=code, severity=Severity.WARN, message="x"
+            ).code == code

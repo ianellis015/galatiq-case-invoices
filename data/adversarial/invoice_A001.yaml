@@ -1,0 +1,30 @@
+# Adversarial fixture (mine, not provided with the assessment).
+#
+# Purpose: a format with no dedicated parser. There is no YAML loader in this system
+# and there is not going to be one -- this file exists to prove that an unanticipated
+# format still gets read, extracted and decided on, taking the same text route a
+# plain .txt invoice takes.
+#
+# Contents are deliberately valid and unremarkable: WidgetA 4 and WidgetB 2 are both
+# within stock, and the arithmetic reconciles. If this invoice is rejected, the
+# reason is the format handling, not the invoice.
+
+invoice_number: INV-A001
+vendor:
+  name: Cascade Fabrication Co.
+  address: 88 Harbor Way, Seattle, WA 98104
+date: 2026-02-02
+due_date: 2026-03-04
+currency: USD
+line_items:
+  - item: WidgetA
+    quantity: 4
+    unit_price: 250.00
+  - item: WidgetB
+    quantity: 2
+    unit_price: 500.00
+subtotal: 2000.00
+tax_rate: 0.05
+tax_amount: 100.00
+total: 2100.00
+payment_terms: Net 30

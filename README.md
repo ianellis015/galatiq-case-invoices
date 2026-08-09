@@ -71,7 +71,7 @@ return to a known stock position.
 uv run pytest
 ```
 
-Expected: `84 passed`. The suite uses temporary databases and never touches
+Expected: `199 passed`. The suite uses temporary databases and never touches
 `var/invoices.db`.
 
 ### Inspect the database
@@ -98,6 +98,7 @@ src/galatiq/
 ├── config.py          paths and environment resolution
 ├── money.py           exact money handling (Decimal ↔ integer cents)
 ├── models.py          the shapes passed between stages
+├── loaders/           reading any document off disk, in any format
 └── store/
     ├── schema.sql     inventory + ledger tables
     ├── db.py          connections and schema creation
@@ -105,6 +106,7 @@ src/galatiq/
     └── repository.py  all reads and writes
 tests/                 pytest suite
 data/invoices/         the provided test corpus (16 invoices, 20 files)
+data/adversarial/      my own fixtures, in formats the corpus does not contain
 var/                   runtime database (gitignored, regenerated)
 ```
 
@@ -122,11 +124,11 @@ var/                   runtime database (gitignored, regenerated)
 | Payment idempotency | `UNIQUE` on `invoice_number` — re-running a batch cannot pay the same invoice twice |
 | Exact money handling | `Decimal` in memory, integer cents on disk, `float` rejected at the boundary |
 | Data shapes | `Invoice`, `LineItem`, `Finding`, `ApprovalDecision`, `PaymentResult` — the objects passed between stages, and the schema handed to the LLM for structured output |
+| Format loaders | Any document that decodes to text, whatever its extension. Dedicated structural parsers for txt, pdf, json, xml and csv; everything else falls back to text. Directory and glob discovery for batch mode |
 
 **Not yet implemented**
 
-Invoice loading (txt/pdf/json/xml/csv), extraction, validation checks, the policy
-engine, approval, and payment execution.
+Extraction, validation checks, the policy engine, approval, and payment execution.
 
 ---
 
@@ -157,3 +159,68 @@ sources of truth that can disagree.
 contains all of those. If the schema rejected them, extraction would crash and the
 reviewer would learn nothing; the product is a reasoned rejection, not a stack trace.
 Judging whether an invoice is correct is the checks' job.
+
+**No input crashes the pipeline. Every input produces a decision with reasoning.**
+This is the invariant the ingestion layer is built to. Nothing in `loaders/` raises for
+a content problem — an unreadable file, an unknown extension, malformed JSON — because
+a stack trace tells the person running a batch of twenty invoices nothing, while a
+rejection naming the file and the reason tells them everything. Load-time problems come
+back as `Finding`s on the document and travel the same reporting channel as every
+validation finding.
+
+**Text is the universal interface.** Every document produces `raw_text`, whatever its
+format, and the extractor reads text. That is what makes the system indifferent to
+layout: an invoice in a shape nobody anticipated is still text. It costs nothing to
+guarantee, because JSON, XML and CSV files already *are* text.
+
+**Structural parsing is a cross-check, not a bypass.** When a parser recognises a shape
+it produces a `structural_hint` — a second, independent reading of the same document.
+The extractor gets it as context and the critic gets something to disagree with: when a
+deterministic parse says the subtotal is 21040.00 and the model says 21400.00, that
+disagreement is a caught misparse. When no parser recognises the shape, the hint is
+simply absent and extraction proceeds from text — so degradation needs no detection
+logic and no branch that can be wrong.
+
+**Loaders report, they do not repair.** OCR damage (`2O26`, `$3,500.O0`), typo'd field
+labels (`INVOCE`, `Vndr`), and inconsistent invoice numbers (`INV 1012` against
+`INV-1012` everywhere else) all pass through untouched. Deciding what those were meant
+to say needs the whole document in view — that is the extractor's judgement, and one
+the critic can question. A loader that quietly fixed them would destroy the evidence
+and silently rewrite a document the system moves money against.
+
+**A parser that knows two shapes says so rather than guessing at a third.** A CSV whose
+columns are all named differently parses mechanically into a tidy dict containing no
+invoice number and no line items. Passing that on as a hint would be worse than passing
+nothing — it looks like a reading of the document, and the downstream mismatch gets
+misdiagnosed as an arithmetic problem rather than a parse failure. A hint has to clear a
+bar to be offered at all.
+
+---
+
+## Assumptions
+
+Recorded here rather than buried in code.
+
+**The structural parsers are fitted to the provided corpus.** The XML parser assumes
+INV-1014's schema; the CSV parser knows two layouts. A UBL invoice or an unfamiliar CSV
+dialect produces no hint and takes the text route with an INFO note. Generalising the
+parsers would be building for invoices that do not exist — the model is the
+generalisation mechanism.
+
+**Inventory is read-only.** Validation is a pure function of the invoice plus seed data,
+so batch runs are order-independent and repeatable. Stock is never decremented, so
+processing the same batch twice gives the same findings both times.
+
+**A directory of the corpus yields 20 documents, not 16.** INV-1011, 1012 and 1013 each
+exist as a pair whose contents genuinely differ, so both members are real documents and
+both are processed. The ledger's `UNIQUE` constraint means a pair can only ever produce
+one payment.
+
+**Partial approval is out of scope.** INV-1016 has two valid lines and one unknown item;
+the system rejects the whole invoice with reasoning rather than paying a subset.
+
+**A revision supersedes its original** if the original is unpaid. If it is already paid,
+the revision is held for human review rather than auto-paid.
+
+**The catalog defines truth for item identity.** An item absent from inventory is
+unknown, not new.
