@@ -1,119 +1,150 @@
-# Galatiq Case: Invoice Processing Automation
+# Galatiq — Invoice Processing Pipeline
 
-## Background
+A multi-agent system that ingests invoices in mixed formats, validates them against
+inventory, reasons through approval, and records payment — designed so that every
+decision can be reconstructed after the fact.
 
-Acme Corp is a PE-backed manufacturing firm losing **$2M/year** on manual invoice processing. Invoices arrive via email as PDFs in messy formats with frequent errors. Staff manually extract data, validate against a legacy inventory database (inconsistent), obtain VP approval (via email chains), and process payment (via a banking API).
+**Governing principle:** the LLM handles ambiguity, deterministic code handles
+correctness. The model reads messy documents into structure and writes human-legible
+reasoning. It never does arithmetic, never queries stock, never evaluates a
+threshold, and never decides to release a payment.
 
-**Current pain points:**
-- 30% error rate
-- 5-day processing delays
-- Frustrated stakeholders
+> **Status:** early. The persistence layer is built and tested. Invoice loading,
+> extraction, validation, approval, and payment are not yet implemented. See
+> [Current status](#current-status).
 
-## Objective
+---
 
-Build a **multi-agent system** that automates the end-to-end invoice processing workflow. The system must run as a working prototype — not just designs or slides.
+## Setup
 
-## Workflow
+### Requirements
 
-The system should handle four stages:
+- **Python 3.14+**
+- **[uv](https://docs.astral.sh/uv/)** — manages the virtual environment and dependencies
 
-1. **Ingestion** — Extract structured data from invoice documents (PDFs, text files). Fields include: Vendor, Amount, Items (with quantities), and Due Date. Expect unstructured text, typos, missing data, and potentially fraudulent entries.
+Nothing needs to be running. There is no server, no daemon, and no database to
+install — the database is a local SQLite file created by the seed script below.
 
-2. **Validation** — Verify extracted data against a mock inventory database (SQLite). Flag mismatches such as quantity exceeding available stock or items not found in inventory.
+No API key is required at this stage; nothing implemented so far calls an LLM.
 
-3. **Approval** — Simulate VP-level review with rule-based decision-making (e.g., invoices over $10K require additional scrutiny). The agent should reason through approval/rejection with a reflection or critique loop.
-
-4. **Payment** — If approved, call a mock payment function. If rejected, log the rejection with reasoning.
-
-## Technical Requirements
-
-- **LLM Integration**: Use xAI's Grok as the core reasoning engine (via the xAI API at https://grok.x.ai). Other models are acceptable if you don't have an API key.
-- **Multi-Agent Orchestration**: Use a framework such as LangGraph, CrewAI, AutoGen, or a custom solution.
-- **Agent Capabilities**: Function calling / tool use, structured outputs, and self-correction loops.
-- **Runtime**: Assume no internet for external APIs — simulate everything locally.
-- **Tech Stack**: Python (preferred), with libraries like `langchain`, `crewai`, `autogen`, `pdfplumber`, `PyMuPDF`, etc. Run locally — no cloud deployment.
-
-## Provided Resources
-
-### Mock Invoice Data
-
-Sample invoices are provided in the `data/invoices/` directory in various formats (PDF, CSV, JSON, TXT). Use these as inputs for testing. The data intentionally includes a mix of clean entries and problematic ones — identifying and handling issues is part of the challenge.
-
-### Mock Inventory Database (Required Setup)
-
-Before running the system, you **must** create a local SQLite database that the validation agent will check invoices against. The sample invoices in `data/invoices/` reference specific items and quantities — your database needs to contain matching inventory records so the validation stage can flag mismatches, out-of-stock items, and unknown products.
-
-Below is a starter schema and seed data that covers the core items referenced across the provided invoices:
-
-```python
-import sqlite3
-
-conn = sqlite3.connect('inventory.db')  # Persist to file so all agents can access it
-cursor = conn.cursor()
-
-cursor.execute('CREATE TABLE IF NOT EXISTS inventory (item TEXT PRIMARY KEY, stock INTEGER)')
-cursor.execute("""
-    INSERT INTO inventory VALUES
-    ('WidgetA', 15),
-    ('WidgetB', 10),
-    ('GadgetX', 5),
-    ('FakeItem', 0)
-""")
-conn.commit()
-```
-
-**Why this matters:** The sample invoices are designed to test your validation logic against this database. For example:
-
-| Scenario | Invoice | What should happen |
-|---|---|---|
-| Normal order within stock | INV-1001, INV-1004, INV-1006 | Items found, quantities valid — passes validation |
-| Quantity exceeds stock | INV-1002 (requests 20× GadgetX, only 5 in stock) | Flagged as stock mismatch |
-| Fraudulent / zero-stock item | INV-1003 (references FakeItem, 0 stock) | Flagged as out of stock or suspicious |
-| Item not in database at all | INV-1008 (SuperGizmo, MegaSprocket), INV-1016 (WidgetC) | Flagged as unknown item |
-| Invalid data | INV-1009 (negative quantity) | Flagged as data integrity issue |
-
-You may extend the seed data with additional items or columns (e.g., unit price, category) to support richer validation — the above is the minimum needed to exercise the provided test invoices. If you want your system to also validate pricing or vendor information, consider adding tables for those as well.
-
-### Mock Payment API
-
-```python
-def mock_payment(vendor, amount):
-    print(f"Paid {amount} to {vendor}")
-    return {"status": "success"}
-```
-
-### Grok API Setup
-
-```python
-from xai import Grok
-
-client = Grok(api_key="your_key")
-response = client.chat.completions.create(
-    model="grok-3",
-    messages=[{"role": "user", "content": "Reason about this..."}]
-)
-```
-
-## Running the System
-
-The system should be executable from the command line:
+### Install
 
 ```bash
-python main.py --invoice_path=data/invoices/invoice1.txt
+uv sync
 ```
 
-Output should include structured logs and results.
+Creates `.venv/` in the project root, installs dependencies, and installs the
+`galatiq` package in editable mode. Run once after cloning, and again whenever
+dependencies change.
 
-## Evaluation Criteria
+You do **not** need to activate the virtual environment — every command below uses
+`uv run`, which executes inside it automatically. If you prefer activating it,
+`source .venv/bin/activate` works and lets you drop the `uv run` prefix.
 
-- **Functionality** — Does the system work end-to-end?
-- **Code Quality** — Clean, testable, well-structured code with error handling and observability
-- **Agentic Sophistication** — LLM integration, multi-agent flow, tool use, self-correction loops
-- **Shipping Mindset** — Valuable MVP delivered under ambiguity; scope ruthlessly cut where needed
-- **Presentation** — Clear translation of technical decisions to business impact
-- **Above/Beyond** - Have you made it your own? Implemented additional features that make the solution feel great? Expanded assumptions? Added to test cases?
-- **UI/UX** - Users will understand and enjoy using this system.
+---
 
-## Submission
+## Running
 
-Submit your solution as a link to a public GitHub repository — GitHub only (github.com).
+### Seed the database
+
+```bash
+uv run python -m galatiq.store.seed
+```
+
+Creates `var/invoices.db` and fills the inventory table:
+
+```
+Seeded 4 inventory items:
+  FakeItem   stock=0    price=-
+  GadgetX    stock=5    price=$750.00
+  WidgetA    stock=15   price=$250.00
+  WidgetB    stock=10   price=$500.00
+```
+
+Safe to run repeatedly — it resets stock to these starting values rather than
+erroring on the second run. Reproducible batch results depend on being able to
+return to a known stock position.
+
+### Run the tests
+
+```bash
+uv run pytest
+```
+
+Expected: `46 passed`. The suite uses temporary databases and never touches
+`var/invoices.db`.
+
+### Inspect the database
+
+```bash
+sqlite3 var/invoices.db "SELECT * FROM inventory;"
+sqlite3 var/invoices.db "SELECT * FROM ledger;"
+```
+
+### Reset
+
+```bash
+rm var/invoices.db && uv run python -m galatiq.store.seed
+```
+
+`var/` is gitignored and regenerated, so deleting it costs nothing.
+
+---
+
+## Project layout
+
+```
+src/galatiq/
+├── config.py          paths and environment resolution
+├── money.py           exact money handling (Decimal ↔ integer cents)
+└── store/
+    ├── schema.sql     inventory + ledger tables
+    ├── db.py          connections and schema creation
+    ├── seed.py        inventory seed data
+    └── repository.py  all reads and writes
+tests/                 pytest suite
+data/invoices/         the provided test corpus (16 invoices, 20 files)
+var/                   runtime database (gitignored, regenerated)
+```
+
+---
+
+## Current status
+
+**Implemented**
+
+| Component | Notes |
+|---|---|
+| `inventory` table | Stock on hand plus catalog unit prices, seeded from the brief's starter data |
+| `ledger` table | One row per paid invoice, with the provider and model that produced the decision |
+| Re-runnable seed | `INSERT OR REPLACE`, so stock always returns to a known position |
+| Payment idempotency | `UNIQUE` on `invoice_number` — re-running a batch cannot pay the same invoice twice |
+| Exact money handling | `Decimal` in memory, integer cents on disk, `float` rejected at the boundary |
+
+**Not yet implemented**
+
+Invoice loading (txt/pdf/json/xml/csv), extraction, validation checks, the policy
+engine, approval, and payment execution.
+
+---
+
+## Design notes
+
+**Money is never a float.** Floats are binary fractions, so ordinary decimal
+amounts have no exact representation and arithmetic accumulates error. That matters
+because validation compares computed sums against stated totals within a $0.01
+tolerance, and policy thresholds ($10,000) are exact boundary comparisons. Amounts
+are `Decimal` in memory and integer cents on disk, converting only through
+`galatiq.money`.
+
+**Idempotency is enforced by the database, not by calling code.** `record_payment`
+attempts the insert and lets the `UNIQUE` constraint reject a duplicate, rather than
+reading first and writing second — a read-then-write leaves a window where a crash or
+a re-run can produce a second payment.
+
+**Inventory is read-only by default.** Validation is a pure function of the invoice
+plus seed data, so batch runs are order-independent and repeatable.
+
+**No hand-rolled audit table.** LangGraph's SQLite checkpointer will own its own
+tables in a separate database file; a second audit store alongside it would give two
+sources of truth that can disagree.
