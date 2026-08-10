@@ -84,7 +84,7 @@ return to a known stock position.
 uv run pytest
 ```
 
-Expected: `374 passed, 27 deselected`. The suite uses temporary databases and never touches
+Expected: `448 passed, 27 deselected`. The suite uses temporary databases and never touches
 `var/invoices.db`.
 
 The deselected tests hit the real API. They cost money, need a key, and fail when the
@@ -122,11 +122,13 @@ src/galatiq/
 ├── dates.py           parsing what a document called a date
 ├── amounts.py         parsing what a document called an amount
 ├── mapping.py         structural hints, and cross-checking two readings
+├── fx.py              currency conversion, from a static table
 ├── state.py           the shared document every graph node writes to
 ├── graph.py           the pipeline as a state graph
 ├── loaders/           reading any document off disk, in any format
 ├── llm/               the typed interface every agent calls through
 ├── agents/            the nodes that call a model
+├── checks/            the seven deterministic validation checks
 └── store/
     ├── schema.sql     inventory + ledger tables
     ├── db.py          connections and schema creation
@@ -155,11 +157,11 @@ var/                   runtime database (gitignored, regenerated)
 | Format loaders | Any document that decodes to text, whatever its extension. Dedicated structural parsers for txt, pdf, json, xml and csv; everything else falls back to text. Directory and glob discovery for batch mode |
 | LLM provider layer | One typed interface every agent calls through — a pydantic model in, a validated instance out. Grok via the OpenAI-compatible endpoint, with strict structured output and bounded transport retries |
 | Extraction phase | Extractor and extraction critic, running in a LangGraph state graph with two bounded self-correction loops and durable checkpointing |
+| Validation phase | Item normalisation against the catalog, then seven checks fanned out in parallel — stock, arithmetic, integrity, duplicates, dates, currency, fraud |
 
 **Not yet implemented**
 
-Item normalisation, the validation checks, the policy engine, approval, and payment
-execution.
+The policy engine, approval, and payment execution.
 
 ---
 
@@ -246,6 +248,32 @@ mean, and the gap between them is what a finding reports. Collapsing the two wou
 either crashing on those documents or silently rewriting `$3,500.O0` as `3500.00` — and
 the second is worse, because a corrected amount is indistinguishable from one that was
 always right and the correction leaves no trace.
+
+**Quantities aggregate per item, not per line.** INV-1013 lists eight lines with items
+repeating — WidgetA appears as 15, 5 and 2. Each passes on its own against a stock of 15.
+Together they are 22, and all three products bust. A per-line check approves that invoice
+and pays for stock that does not exist, without erroring.
+
+**Item names are matched conservatively, and never fuzzily.**
+`difflib.SequenceMatcher("WidgetC", "WidgetA")` scores about 0.857 — any cutoff loose
+enough to accept `Widget A` also accepts `WidgetC`, which would turn INV-1016's unknown
+item into an in-stock one and approve the payment. So differences in *formatting* are
+resolved and differences in *content* never are: strip qualifiers and punctuation,
+lowercase, and require an exact match on what remains. A missed match means a human
+resolves it in a minute; a wrong match means money leaves against a product nobody sells,
+and nothing downstream would catch it.
+
+**Checks report; they do not decide.** A CRITICAL finding is a statement about the
+invoice, not a verdict on it. Whether one means rejection is the policy engine's
+question, and separating them is what lets the rules change without touching the code
+that detects the facts.
+
+**The check context is a snapshot, taken once.** Seven concurrent database reads become
+one, checks become pure functions of explicit data that a test can construct in three
+lines, and the snapshot travels in the checkpointed state — so the audit trail answers
+*"what stock did we see when we rejected this?"* rather than *"what does stock say
+now?"*. `today` is injected for the same reason: a past-due check that calls
+`date.today()` passes today and fails next month.
 
 **Document text is data, never instruction.** Invoices are written by vendors, and a
 vendor is not a trusted party. Instructions live in the system message and document

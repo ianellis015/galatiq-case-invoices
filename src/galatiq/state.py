@@ -48,6 +48,22 @@ class InvoiceState(TypedDict, total=False):
     last_validation_error: str | None
     critique: Any | None
 
+    # --- validation ---
+    #
+    # A snapshot of everything the checks are allowed to know: stock, catalog prices,
+    # paid invoice numbers, today's date, FX rates. Taken once before the fan-out.
+    #
+    # Kept in state rather than read per-check so the audit trail answers "what stock
+    # did we see when we rejected this?" rather than "what does stock say now". Plain
+    # dicts, because the checkpointer serialises this and depending on how it handles
+    # custom types is a dependency worth not having.
+    check_context: dict[str, Any] | None
+
+    # Deduplicated and severity-sorted. Written once, after the fan-out. The raw
+    # `findings` list stays as it was so a checkpoint records what each check actually
+    # said, not just the tidied summary.
+    merged_findings: list[Finding]
+
 
 def initial_state(source_path: str) -> InvoiceState:
     """A fresh state for one document.
@@ -66,4 +82,6 @@ def initial_state(source_path: str) -> InvoiceState:
         critic_attempts=0,
         last_validation_error=None,
         critique=None,
+        check_context=None,
+        merged_findings=[],
     )

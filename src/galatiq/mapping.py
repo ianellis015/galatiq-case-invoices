@@ -17,6 +17,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from galatiq.amounts import parse_amounts
+from galatiq.dates import parse_invoice_dates
 from galatiq.models import (
     Finding,
     FindingCode,
@@ -94,7 +95,9 @@ def hint_to_invoice(
     # Parsed immediately: this path involves no model, so there is nothing to wait
     # for and no reason to hand a caller half-converted data.
     return parse_amounts(
-        Invoice(source_path=source_path, source_format=source_format, **fields)
+        parse_invoice_dates(
+            Invoice(source_path=source_path, source_format=source_format, **fields)
+        )
     )
 
 
