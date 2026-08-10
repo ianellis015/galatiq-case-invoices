@@ -12,7 +12,7 @@ a reducer says otherwise.
 import operator
 from typing import Annotated, Any, TypedDict
 
-from galatiq.models import Finding, Invoice
+from galatiq.models import ApprovalDecision, Finding, Invoice, PaymentResult
 
 
 class InvoiceState(TypedDict, total=False):
@@ -64,6 +64,15 @@ class InvoiceState(TypedDict, total=False):
     # said, not just the tidied summary.
     merged_findings: list[Finding]
 
+    # --- approval ---
+    policy: Any | None
+    decision: ApprovalDecision | None
+    approval_critique: Any | None
+    reflect_attempts: int
+
+    # --- payment ---
+    payment: PaymentResult | None
+
 
 def initial_state(source_path: str) -> InvoiceState:
     """A fresh state for one document.
@@ -84,4 +93,9 @@ def initial_state(source_path: str) -> InvoiceState:
         critique=None,
         check_context=None,
         merged_findings=[],
+        policy=None,
+        decision=None,
+        approval_critique=None,
+        reflect_attempts=0,
+        payment=None,
     )

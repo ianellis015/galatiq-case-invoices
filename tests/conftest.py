@@ -10,8 +10,27 @@ from types import SimpleNamespace
 import pytest
 
 from galatiq.agents import Critique
+from galatiq.agents.approval_critic import ApprovalCritique
+from galatiq.agents.approver import ApproverVerdict
+from galatiq.agents.normalizer import ItemMatches
 from galatiq.llm import LLMResult
-from galatiq.models import Invoice, LineItem
+from galatiq.models import Invoice, LineItem, Outcome
+
+# Stand-ins for the approval agents, used when a test has not scripted them. Both are
+# the neutral answer: approve, notice nothing. That keeps the policy engine as the only
+# thing deciding an outcome in tests that are not about approval, which is exactly the
+# property the interlock is supposed to have.
+_DEFAULTS = {
+    "ApproverVerdict": lambda: ApproverVerdict(
+        outcome=Outcome.APPROVED, rationale="Scripted default.", risk_score=0
+    ),
+    "ApprovalCritique": lambda: ApprovalCritique(
+        verdict="SOUND", reasoning="Scripted default."
+    ),
+    # No matches, which is what the normalizer does when it cannot place a name. The
+    # conservative answer, and the one that keeps an unknown item unknown.
+    "ItemMatches": lambda: ItemMatches(matches=[]),
+}
 
 
 class FakeLLM:
@@ -44,13 +63,29 @@ class FakeLLM:
             )
         )
 
-        if not self.queue:
-            raise AssertionError(
-                f"FakeLLM: unscripted call #{len(self.calls)} for "
-                f"{response_model.__name__}"
-            )
+        # A queued response is used only if it is the type being asked for. Matching by
+        # type rather than by position means a script can cover the extraction loop
+        # without accounting for the approval calls that follow it -- and an approval
+        # call can never consume a response that was written for the extractor.
+        head = self.queue[0] if self.queue else None
 
-        item = self.queue.pop(0)
+        if head is not None and (
+            isinstance(head, Exception) or isinstance(head, response_model)
+        ):
+            item = self.queue.pop(0)
+        else:
+            # Approval responses are synthesised rather than demanded, so a test about
+            # extraction does not have to script four calls to say something about two.
+            # Everything else still raises: an unscripted extraction call is a real
+            # behaviour change, and handing back something plausible would hide it.
+            default = _DEFAULTS.get(response_model.__name__)
+            if default is None:
+                raise AssertionError(
+                    f"FakeLLM: unscripted call #{len(self.calls)} for "
+                    f"{response_model.__name__}"
+                )
+            item = default()
+
         if isinstance(item, Exception):
             raise item
 
@@ -66,6 +101,19 @@ class FakeLLM:
     @property
     def call_count(self) -> int:
         return len(self.calls)
+
+    @property
+    def extraction_calls(self) -> int:
+        """Calls made while reading the document.
+
+        The graph runs approval too, so a raw call count no longer says anything about
+        the extraction loop. This does.
+        """
+        return self.count_for("Invoice", "Critique")
+
+    def count_for(self, *model_names: str) -> int:
+        wanted = set(model_names)
+        return sum(1 for c in self.calls if c.response_model.__name__ in wanted)
 
 
 @pytest.fixture

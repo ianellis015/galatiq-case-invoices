@@ -25,6 +25,8 @@ from typing import Any, Callable, Iterator, Literal
 
 from langgraph.graph import END, START, StateGraph
 
+from galatiq.agents.approval_critic import critique_decision
+from galatiq.agents.approver import decide, revise
 from galatiq.agents.extract_critic import critique_extraction, findings_for
 from galatiq.agents.extractor import extract_invoice
 from galatiq.agents.normalizer import normalize_invoice
@@ -37,11 +39,26 @@ from galatiq.checks import (
     run_check,
     snapshot,
 )
-from galatiq.config import AUDIT_DB_PATH, MAX_CRITIC_ATTEMPTS, MAX_SCHEMA_ATTEMPTS
+from galatiq.config import (
+    AUDIT_DB_PATH,
+    MAX_CRITIC_ATTEMPTS,
+    MAX_REFLECT_ATTEMPTS,
+    MAX_SCHEMA_ATTEMPTS,
+)
 from galatiq.llm import LLMClient
 from galatiq.loaders import load
 from galatiq.mapping import compare_to_hint
-from galatiq.models import Finding, FindingCode, Invoice, Severity
+from galatiq.models import (
+    Finding,
+    FindingCode,
+    Invoice,
+    Outcome,
+    PaymentResult,
+    PaymentStatus,
+    Severity,
+)
+from galatiq.payment import execute_payment
+from galatiq.policy import evaluate
 from galatiq.state import InvoiceState, initial_state
 from galatiq.store.db import connect
 
@@ -272,6 +289,171 @@ def make_check_node(name: str, check: Check):
     return check_node
 
 
+def make_approve_node(client: LLMClient | None):
+    """Build the approve node.
+
+    The rules engine runs here too, on every pass. It is deterministic and cheap, and
+    re-evaluating means the decision is always a function of the findings as they stand
+    rather than of a policy result computed three nodes ago.
+    """
+
+    def approve_node(state: InvoiceState) -> dict[str, Any]:
+        invoice = state.get("invoice")
+        findings = state.get("merged_findings") or state.get("findings", [])
+
+        if invoice is None:
+            return {}
+
+        policy = evaluate(invoice, findings)
+        critique = state.get("approval_critique")
+
+        if critique is not None and getattr(critique, "found_something", False):
+            decision = revise(
+                client,
+                invoice=invoice,
+                findings=findings,
+                policy=policy,
+                critique=critique,
+            )
+        else:
+            decision = decide(
+                client, invoice=invoice, findings=findings, policy=policy
+            )
+
+        return {"policy": policy, "decision": decision}
+
+    return approve_node
+
+
+def make_approval_critic_node(client: LLMClient | None):
+    """Build the approval critic node."""
+
+    def approval_critic_node(state: InvoiceState) -> dict[str, Any]:
+        invoice = state.get("invoice")
+        decision = state.get("decision")
+
+        if invoice is None or decision is None:
+            return {}
+
+        critique = critique_decision(
+            client,
+            invoice=invoice,
+            findings=state.get("merged_findings") or state.get("findings", []),
+            decision=decision,
+        )
+
+        update: dict[str, Any] = {"approval_critique": critique}
+
+        # Same discipline as the extraction loop: the counter moves only when the critic
+        # actually sends work back. A SOUND verdict costs nothing and should not consume
+        # a budget that exists to bound re-reviewing.
+        if critique.found_something:
+            update["reflect_attempts"] = state.get("reflect_attempts", 0) + 1
+
+        return update
+
+    return approval_critic_node
+
+
+def make_pay_node(connect_db: Callable[[], Any], provider: str, model: str):
+    """Build the payment node.
+
+    Not an agent. A tool call behind a deterministic edge, reached only when the rules
+    and the model both concurred.
+    """
+
+    def pay_node(state: InvoiceState) -> dict[str, Any]:
+        invoice = state.get("invoice")
+        decision = state.get("decision")
+
+        if invoice is None or decision is None:
+            return {}
+
+        conn = connect_db()
+        try:
+            payment = execute_payment(
+                conn, invoice, decision, provider=provider, model=model
+            )
+        finally:
+            conn.close()
+
+        return {"payment": payment}
+
+    return pay_node
+
+
+def reject_node(state: InvoiceState) -> dict[str, Any]:
+    """Terminal. The decision and its reasoning are already in state.
+
+    Nothing is written here beyond a payment record saying none was attempted. The
+    rejection *is* the decision plus the findings that produced it, and the checkpointer
+    has already durably recorded both -- a separate rejection log would be a second copy
+    of the same facts, free to drift from the first.
+    """
+    decision = state.get("decision")
+    invoice = state.get("invoice")
+
+    return {
+        "payment": PaymentResult(
+            invoice_number=(invoice.invoice_number if invoice else None) or "",
+            status=PaymentStatus.NOT_ATTEMPTED,
+            message=(
+                f"Rejected: {decision.rationale}" if decision else "Rejected."
+            ),
+        )
+    }
+
+
+def make_hold_node(interactive: bool):
+    """Build the hold node.
+
+    `interrupt()` durably suspends the graph and persists state, so a human decision can
+    arrive minutes or days later and the run continues from exactly where it paused. That
+    is the honest implementation of "obtain VP approval" -- the brief describes it as a
+    real step in the current process, and a simulated pause would not survive the process
+    it is modelling.
+
+    Off by default. A batch of twenty invoices should not block on the third one waiting
+    for someone to come back from lunch: held invoices are recorded and the run moves on,
+    and the review queue is worked through afterwards.
+    """
+
+    def hold_node(state: InvoiceState) -> dict[str, Any]:
+        decision = state.get("decision")
+        invoice = state.get("invoice")
+
+        if interactive:
+            from langgraph.types import interrupt
+
+            verdict = interrupt(
+                {
+                    "invoice_number": invoice.invoice_number if invoice else None,
+                    "rationale": decision.rationale if decision else "",
+                    "findings": [
+                        f.model_dump() for f in state.get("merged_findings", [])
+                    ],
+                }
+            )
+            if verdict == "approve":
+                return {"decision": decision.model_copy(
+                    update={"outcome": Outcome.APPROVED}
+                )}
+            if verdict == "reject":
+                return {"decision": decision.model_copy(
+                    update={"outcome": Outcome.REJECTED}
+                )}
+
+        return {
+            "payment": PaymentResult(
+                invoice_number=(invoice.invoice_number if invoice else None) or "",
+                status=PaymentStatus.NOT_ATTEMPTED,
+                message="Held for human review.",
+            )
+        }
+
+    return hold_node
+
+
 def merge_findings_node(state: InvoiceState) -> dict[str, Any]:
     """Deduplicate and order what the checks produced.
 
@@ -303,6 +485,41 @@ def after_extract(state: InvoiceState) -> Literal["extract", "extract_critic"]:
     return "extract_critic"
 
 
+def after_approval_critic(
+    state: InvoiceState,
+) -> Literal["approve", "pay", "reject", "hold"]:
+    """Reconsider, or act.
+
+    One function handling both the loop and the terminal routing, because they are the
+    same question asked once: is there more thinking to do, and if not, what happens?
+    Splitting them into a routing function and a pass-through `route` node would add a
+    node that decides nothing.
+
+    The three terminals are mutually exclusive and exhaustive -- every invoice ends at
+    exactly one, which is the invariant the whole system is built to.
+    """
+    critique = state.get("approval_critique")
+
+    if (
+        critique is not None
+        and critique.found_something
+        and state.get("reflect_attempts", 0) < MAX_REFLECT_ATTEMPTS
+    ):
+        return "approve"
+
+    decision = state.get("decision")
+    if decision is None:
+        # No decision at all. Held rather than paid: whatever went wrong, a human
+        # should look at it.
+        return "hold"
+
+    if decision.outcome is Outcome.APPROVED:
+        return "pay"
+    if decision.outcome is Outcome.REJECTED:
+        return "reject"
+    return "hold"
+
+
 def after_critic(state: InvoiceState) -> Literal["extract", "finalize"]:
     """Re-read the document, or finish.
 
@@ -331,6 +548,9 @@ def build_graph(
     *,
     checkpointer: Any | None = None,
     connect_db: Callable[[], Any] | None = None,
+    interactive: bool = False,
+    provider: str | None = None,
+    model: str | None = None,
 ):
     """Compile the pipeline.
 
@@ -340,6 +560,9 @@ def build_graph(
     `connect_db` is injectable so tests point the checks at a temporary database rather
     than the developer's real one.
     """
+    provider = provider or getattr(client, "provider", "unknown")
+    model = model or getattr(client, "model", "unknown")
+
     builder = StateGraph(InvoiceState)
 
     builder.add_node("load", load_node)
@@ -385,7 +608,31 @@ def build_graph(
         builder.add_edge("normalize", name)
         builder.add_edge(name, "merge_findings")
 
-    builder.add_edge("merge_findings", END)
+    builder.add_node("approve", make_approve_node(client))
+    builder.add_node("approval_critic", make_approval_critic_node(client))
+    builder.add_node("pay", make_pay_node(connect_db or connect, provider, model))
+    builder.add_node("reject", reject_node)
+    builder.add_node("hold", make_hold_node(interactive))
+
+    builder.add_edge("merge_findings", "approve")
+    builder.add_edge("approve", "approval_critic")
+
+    # The second cycle, and the three terminals. Every invoice ends at exactly one of
+    # pay, reject or hold -- there is no path that reaches END without a decision.
+    builder.add_conditional_edges(
+        "approval_critic",
+        after_approval_critic,
+        {
+            "approve": "approve",
+            "pay": "pay",
+            "reject": "reject",
+            "hold": "hold",
+        },
+    )
+
+    builder.add_edge("pay", END)
+    builder.add_edge("reject", END)
+    builder.add_edge("hold", END)
 
     return builder.compile(checkpointer=checkpointer)
 

@@ -47,6 +47,10 @@ AUDIT_DB_PATH = Path(os.environ.get("AUDIT_DB_PATH", VAR_DIR / "audit.db"))
 MAX_SCHEMA_ATTEMPTS = int(os.environ.get("MAX_SCHEMA_ATTEMPTS", "2"))
 MAX_CRITIC_ATTEMPTS = int(os.environ.get("MAX_CRITIC_ATTEMPTS", "2"))
 
+# The approval reflection loop. Each turn is two model calls and delays a payment, so
+# the same reasoning applies: enough for a genuine second look, not enough to deliberate.
+MAX_REFLECT_ATTEMPTS = int(os.environ.get("MAX_REFLECT_ATTEMPTS", "2"))
+
 
 # --- LLM ---------------------------------------------------------------------
 #
