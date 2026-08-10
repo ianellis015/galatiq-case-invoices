@@ -21,19 +21,29 @@ with an integer comparison.
 
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterator, Literal
+from typing import Any, Callable, Iterator, Literal
 
 from langgraph.graph import END, START, StateGraph
 
 from galatiq.agents.extract_critic import critique_extraction, findings_for
 from galatiq.agents.extractor import extract_invoice
+from galatiq.agents.normalizer import normalize_invoice
 from galatiq.amounts import unparsed_amount_findings
+from galatiq.checks import (
+    Check,
+    CheckContext,
+    all_checks,
+    merge_findings,
+    run_check,
+    snapshot,
+)
 from galatiq.config import AUDIT_DB_PATH, MAX_CRITIC_ATTEMPTS, MAX_SCHEMA_ATTEMPTS
 from galatiq.llm import LLMClient
 from galatiq.loaders import load
 from galatiq.mapping import compare_to_hint
 from galatiq.models import Finding, FindingCode, Invoice, Severity
 from galatiq.state import InvoiceState, initial_state
+from galatiq.store.db import connect
 
 
 # ---------------------------------------------------------------------------
@@ -197,6 +207,82 @@ def finalize_node(state: InvoiceState) -> dict[str, Any]:
     return {"findings": findings}
 
 
+def make_prepare_checks_node(connect_db: Callable[[], Any]):
+    """Snapshot everything the checks are allowed to know, once.
+
+    Before the fan-out rather than inside it: seven concurrent database reads become
+    one, the checks become pure functions of explicit data, and the snapshot lands in
+    the checkpointed state so the audit trail records the stock position that produced
+    the decision rather than whatever stock says when someone reads it later.
+    """
+
+    def prepare_checks_node(state: InvoiceState) -> dict[str, Any]:
+        conn = connect_db()
+        try:
+            return {"check_context": snapshot(conn).to_snapshot()}
+        finally:
+            conn.close()
+
+    return prepare_checks_node
+
+
+def make_normalize_node(client: LLMClient | None):
+    """Build the normalize node.
+
+    The client is optional. Deterministic matching handles every name in the corpus, and
+    an unreachable model leaves unresolved names unresolved -- which is the same outcome
+    as a genuine non-match, and the safe direction to degrade in.
+    """
+
+    def normalize_node(state: InvoiceState) -> dict[str, Any]:
+        invoice = state.get("invoice")
+        context = state.get("check_context")
+
+        if invoice is None or context is None:
+            return {}
+
+        return {
+            "invoice": normalize_invoice(
+                invoice, context.get("stock", {}), client=client
+            )
+        }
+
+    return normalize_node
+
+
+def make_check_node(name: str, check: Check):
+    """Wrap one check as a graph node.
+
+    Each returns only `findings`, which is the key with a reducer -- so seven of these
+    running concurrently concatenate rather than collide. Without that annotation on the
+    state, parallel writes to one key raise InvalidUpdateError, and this fan-out would
+    not be legal.
+    """
+
+    def check_node(state: InvoiceState) -> dict[str, Any]:
+        invoice = state.get("invoice")
+        raw_context = state.get("check_context")
+
+        if invoice is None or raw_context is None:
+            return {"findings": []}
+
+        context = CheckContext.from_snapshot(raw_context)
+        return {"findings": run_check(name, check, invoice, context)}
+
+    return check_node
+
+
+def merge_findings_node(state: InvoiceState) -> dict[str, Any]:
+    """Deduplicate and order what the checks produced.
+
+    Two checks can legitimately notice the same thing, and an audit trail that says it
+    twice reads as two problems. Returning the merged list replaces nothing -- the
+    reducer concatenates -- so this writes to its own key and the raw findings stay
+    intact in the checkpoint for anyone reconstructing the run.
+    """
+    return {"merged_findings": merge_findings(state.get("findings", []))}
+
+
 # ---------------------------------------------------------------------------
 # Routing
 #
@@ -240,11 +326,19 @@ def after_critic(state: InvoiceState) -> Literal["extract", "finalize"]:
 # ---------------------------------------------------------------------------
 
 
-def build_graph(client: LLMClient, *, checkpointer: Any | None = None):
-    """Compile the extraction pipeline.
+def build_graph(
+    client: LLMClient,
+    *,
+    checkpointer: Any | None = None,
+    connect_db: Callable[[], Any] | None = None,
+):
+    """Compile the pipeline.
 
     `checkpointer` is optional so tests can run in memory. In real use it is a
     SqliteSaver, and passing it is the whole cost of durable state, replay and resume.
+
+    `connect_db` is injectable so tests point the checks at a temporary database rather
+    than the developer's real one.
     """
     builder = StateGraph(InvoiceState)
 
@@ -252,6 +346,13 @@ def build_graph(client: LLMClient, *, checkpointer: Any | None = None):
     builder.add_node("extract", make_extract_node(client))
     builder.add_node("extract_critic", make_critic_node(client))
     builder.add_node("finalize", finalize_node)
+    builder.add_node("prepare_checks", make_prepare_checks_node(connect_db or connect))
+    builder.add_node("normalize", make_normalize_node(client))
+    builder.add_node("merge_findings", merge_findings_node)
+
+    checks = all_checks()
+    for name, check in checks.items():
+        builder.add_node(name, make_check_node(name, check))
 
     builder.add_edge(START, "load")
     builder.add_edge("load", "extract")
@@ -269,7 +370,22 @@ def build_graph(client: LLMClient, *, checkpointer: Any | None = None):
         {"extract": "extract", "finalize": "finalize"},
     )
 
-    builder.add_edge("finalize", END)
+    builder.add_edge("finalize", "prepare_checks")
+    builder.add_edge("prepare_checks", "normalize")
+
+    # The fan-out. Seven edges out of normalize and seven back into merge_findings,
+    # written as a loop because the checks are interchangeable by construction -- same
+    # signature in, same type out. Adding an eighth check means adding it to the
+    # registry and nothing else.
+    #
+    # Static edges rather than `Send`, because the set of checks is known at build time.
+    # `Send` is for dynamic fan-out -- one branch per line item, say -- which this design
+    # does not need.
+    for name in checks:
+        builder.add_edge("normalize", name)
+        builder.add_edge(name, "merge_findings")
+
+    builder.add_edge("merge_findings", END)
 
     return builder.compile(checkpointer=checkpointer)
 

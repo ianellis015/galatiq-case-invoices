@@ -10,9 +10,13 @@ the nodes, the reducer and the routing all execute for real while the only simul
 part is the model.
 """
 
+import tempfile
 from decimal import Decimal
+from pathlib import Path
 
 from galatiq.agents import Critique, Discrepancy
+from galatiq.store.db import connect, init_db
+from galatiq.store.seed import seed_inventory
 from galatiq.config import MAX_CRITIC_ATTEMPTS, MAX_SCHEMA_ATTEMPTS, PROJECT_ROOT
 from galatiq.graph import (
     after_critic,
@@ -35,10 +39,40 @@ def misparse(**kwargs):
     return Critique(verdict="MISPARSE_SUSPECTED", reasoning="Quantity misread.", **kwargs)
 
 
+# A seeded database for the whole module. Built once at import rather than per test,
+# because the checks only ever read it -- and never the developer's real one, which is
+# the sort of thing you only get wrong once.
+_DB = Path(tempfile.mkdtemp(prefix="galatiq-graph-")) / "invoices.db"
+_setup = connect(_DB)
+init_db(_setup)
+seed_inventory(_setup)
+_setup.close()
+
+
 def run(client, path):
     """Invoke the graph without a checkpointer — faster, and durability has its own test."""
-    graph = build_graph(client)
+    graph = build_graph(client, connect_db=lambda: connect(_DB))
     return graph.invoke(initial_state(str(path)))
+
+
+def codes(state):
+    return [f.code for f in state["findings"]]
+
+
+def extraction_findings(state):
+    """Only what the extraction phase produced.
+
+    The graph now runs the checks too, so a bare `findings == []` would assert that a
+    real invoice has nothing wrong with it — a different and much stronger claim than
+    these tests mean to make.
+    """
+    phase = {
+        FindingCode.DOC_INCONSISTENT,
+        FindingCode.HINT_DISAGREEMENT,
+        FindingCode.NEEDS_HUMAN_REVIEW,
+        FindingCode.EXTRACTION_UNCERTAIN,
+    }
+    return [f for f in state["findings"] if f.code in phase]
 
 
 # ---------------------------------------------------------------------------
@@ -94,7 +128,7 @@ class TestHappyPath:
 
         assert state["invoice"].invoice_number == "INV-1001"
         assert client.call_count == 2  # one extraction, one audit
-        assert state["findings"] == []
+        assert extraction_findings(state) == []
 
     def test_the_document_is_actually_read_from_disk(self, sample_invoice, sound):
         client = FakeLLM(sample_invoice, sound)
@@ -310,7 +344,7 @@ class TestHintCrossCheck:
 
         state = run(FakeLLM(agreeing, sound), INVOICES / "invoice_1006.csv")
 
-        assert state["findings"] == []
+        assert extraction_findings(state) == []
 
 
 class TestOcrDamage:
@@ -335,10 +369,13 @@ class TestOcrDamage:
         damaged = Invoice(invoice_number="INV-1012", total_raw="$3,500.O0")
 
         state = run(FakeLLM(damaged, sound), INVOICES / "invoice_1012.txt")
-        findings = [f for f in state["findings"] if f.code == FindingCode.DATA_INTEGRITY]
+        unreadable = [
+            f
+            for f in state["findings"]
+            if f.code == FindingCode.DATA_INTEGRITY and "$3,500.O0" in f.evidence
+        ]
 
-        assert len(findings) == 1
-        assert "$3,500.O0" in findings[0].evidence
+        assert len(unreadable) == 1
         assert state["invoice"].total is None
         assert state["invoice"].total_raw == "$3,500.O0"
 
@@ -351,7 +388,9 @@ class TestOcrDamage:
 
         assert state["invoice"].tax_rate == Decimal("0.06")
         assert not [
-            f for f in state["findings"] if f.code == FindingCode.DATA_INTEGRITY
+            f
+            for f in state["findings"]
+            if f.code == FindingCode.DATA_INTEGRITY and "6%" in f.evidence
         ]
 
 
@@ -373,6 +412,108 @@ class TestFindingsAreNotDuplicated:
         ]
 
         assert len(disagreements) == 1
+
+
+class TestValidationFanOut:
+    """The seven checks running concurrently, end to end."""
+
+    def test_findings_from_multiple_checks_merge_without_conflict(self, sound):
+        """Seven nodes writing the same state key at once.
+
+        Without `Annotated[list[Finding], operator.add]` this raises InvalidUpdateError.
+        That one annotation is the difference between a fan-out and a crash.
+        """
+        broken = Invoice(
+            invoice_number="INV-1009",
+            vendor="",
+            line_items=[LineItem(raw_name="WidgetA", quantity=-5, unit_price="250.00")],
+            subtotal="1000.00",
+            total="-250.00",
+            currency="USD",
+        )
+
+        state = run(FakeLLM(broken, sound), INVOICES / "invoice_1009.json")
+        found = set(codes(state))
+
+        assert FindingCode.DATA_INTEGRITY in found
+        assert FindingCode.MATH_MISMATCH in found
+
+    def test_the_context_snapshot_lands_in_state(self, sample_invoice, sound):
+        """So the audit trail answers "what stock did we see when we rejected this?"
+        rather than "what does stock say now"."""
+        state = run(FakeLLM(sample_invoice, sound), INVOICES / "invoice_1001.txt")
+
+        assert state["check_context"]["stock"]["WidgetA"] == 15
+        assert "today" in state["check_context"]
+
+    def test_normalisation_happens_before_the_checks(self, sound):
+        """The stock check aggregates by canonical name, so it cannot run until the
+        names are canonical."""
+        invoice = Invoice(
+            invoice_number="INV-1010",
+            vendor="Acme",
+            total="3000.00",
+            line_items=[
+                LineItem(raw_name="WidgetA (rush order)", quantity=10, unit_price="250.00"),
+                LineItem(raw_name="Widget A", quantity=2, unit_price="250.00"),
+            ],
+        )
+
+        state = run(FakeLLM(invoice, sound), INVOICES / "invoice_1010.txt")
+
+        assert [li.item for li in state["invoice"].line_items] == ["WidgetA", "WidgetA"]
+
+    def test_aggregate_stock_breach_is_caught(self, sound):
+        """INV-1013 end to end: each line passes, the totals do not."""
+        invoice = Invoice(
+            invoice_number="INV-1013",
+            vendor="Atlas Industrial Supply",
+            total="22562.80",
+            currency="USD",
+            line_items=[
+                LineItem(raw_name=n, quantity=q, unit_price=p)
+                for n, q, p in [
+                    ("WidgetA", 15, "250.00"), ("WidgetA", 5, "240.00"),
+                    ("WidgetA", 2, "250.00"),
+                ]
+            ],
+        )
+
+        state = run(FakeLLM(invoice, sound), INVOICES / "invoice_1013.json")
+        breaches = [f for f in state["findings"] if f.code == FindingCode.STOCK_EXCEEDED]
+
+        assert len(breaches) == 1
+        assert "22 requested across 3 lines" in breaches[0].message
+
+    def test_merged_findings_are_deduplicated_and_sorted(self, sound):
+        broken = Invoice(invoice_number="INV-X", vendor="", line_items=[])
+
+        state = run(FakeLLM(broken, sound), INVOICES / "invoice_1001.txt")
+        merged = state["merged_findings"]
+
+        assert merged
+        assert [f.severity for f in merged] == sorted(
+            (f.severity for f in merged),
+            key=lambda s: {Severity.CRITICAL: 0, Severity.WARN: 1, Severity.INFO: 2}[s],
+        )
+
+    def test_the_raw_findings_survive_alongside_the_merged_ones(self, sound):
+        """A checkpoint should record what each check actually said, not just the
+        tidied summary."""
+        broken = Invoice(invoice_number="INV-X", vendor="", line_items=[])
+
+        state = run(FakeLLM(broken, sound), INVOICES / "invoice_1001.txt")
+
+        assert len(state["findings"]) >= len(state["merged_findings"])
+
+    def test_an_unreadable_document_still_reaches_the_checks(self):
+        """No model calls, and the integrity check still reports what is missing."""
+        client = FakeLLM()
+
+        state = run(client, ADVERSARIAL / "invoice_A002.bin")
+
+        assert client.call_count == 0
+        assert FindingCode.DATA_INTEGRITY in codes(state)
 
 
 class TestCheckpointing:

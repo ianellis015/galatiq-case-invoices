@@ -14,6 +14,10 @@ first.
 """
 
 from datetime import date, datetime
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:  # pragma: no cover - import only for the annotation
+    from galatiq.models import Invoice
 
 # Every layout the corpus actually uses, most-specific first.
 #
@@ -64,6 +68,25 @@ def parse_date(text: str | None) -> date | None:
         return datetime.fromisoformat(cleaned).date()
     except ValueError:
         return None
+
+
+def parse_invoice_dates(invoice: "Invoice") -> "Invoice":
+    """Fill an invoice's parsed date fields from its raw ones.
+
+    Lives here rather than inside the extractor because two paths produce invoices --
+    the model's transcription and a structural parser's reading -- and both need the
+    same conversion. When only one of them did it, a structurally-parsed invoice reached
+    the date check with `due_date` still null and was reported as having an unparseable
+    due date of "2026-02-22". Found by running the corpus through the checks by hand.
+
+    An already-parsed field is left alone, so a caller that supplies one keeps it.
+    """
+    return invoice.model_copy(
+        update={
+            "issue_date": invoice.issue_date or parse_date(invoice.issue_date_raw),
+            "due_date": invoice.due_date or parse_date(invoice.due_date_raw),
+        }
+    )
 
 
 def is_parseable(text: str | None) -> bool:

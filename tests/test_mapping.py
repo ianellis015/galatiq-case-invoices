@@ -29,14 +29,23 @@ class TestHintToInvoice:
         assert invoice.subtotal == Decimal("2750.00")
         assert invoice.payment_terms == "Net 15"
 
-    def test_dates_land_in_the_raw_fields(self):
-        """Parsed values are filled in later. Keeping both is what lets the date check
-        tell "no due date" apart from "an unparseable due date"."""
+    def test_dates_are_kept_raw_and_parsed(self):
+        """Both, because the date check needs to tell "no due date" apart from "a due
+        date was stated and it is not a date"."""
+        from datetime import date
+
         invoice = hint_to_invoice({"date": "2026-01-25", "due_date": "2026-02-10"})
 
         assert invoice.issue_date_raw == "2026-01-25"
         assert invoice.due_date_raw == "2026-02-10"
-        assert invoice.issue_date is None
+        assert invoice.issue_date == date(2026, 1, 25)
+        assert invoice.due_date == date(2026, 2, 10)
+
+    def test_an_unparseable_date_leaves_the_parsed_field_null(self):
+        invoice = hint_to_invoice({"due_date": "yesterday"})
+
+        assert invoice.due_date_raw == "yesterday"
+        assert invoice.due_date is None
 
     def test_line_items(self):
         invoice = hint_to_invoice(

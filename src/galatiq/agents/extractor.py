@@ -12,7 +12,7 @@ right.
 """
 
 from galatiq.agents.prompts import extraction_messages
-from galatiq.dates import parse_date
+from galatiq.dates import parse_invoice_dates
 from galatiq.llm import AGENT_EXCLUDED_FIELDS, LLMClient, LLMResponseError
 from galatiq.amounts import parse_amounts
 from galatiq.models import Invoice
@@ -90,23 +90,5 @@ def extract_invoice(
         update={"source_path": source_path, "source_format": source_format}
     )
 
-    return ExtractionOutcome(invoice=parse_amounts(_parse_dates(invoice)))
+    return ExtractionOutcome(invoice=parse_amounts(parse_invoice_dates(invoice)))
 
-
-def _parse_dates(invoice: Invoice) -> Invoice:
-    """Fill the parsed date fields from the raw ones.
-
-    Deterministic, and deliberately outside the model's job. The extractor transcribes
-    "yesterday" and "26-Jan-2O26" as written; this decides whether either denotes a
-    calendar day, and leaves the parsed field null when it does not.
-
-    Both fields survive, which is what lets the date check tell "no due date stated"
-    apart from "a due date was stated and it is not a date" -- two different findings
-    that a single field would collapse into one.
-    """
-    return invoice.model_copy(
-        update={
-            "issue_date": parse_date(invoice.issue_date_raw),
-            "due_date": parse_date(invoice.due_date_raw),
-        }
-    )
