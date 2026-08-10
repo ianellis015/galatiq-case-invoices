@@ -27,6 +27,7 @@ Parser = Callable[[object], object]
 INVOICE_AMOUNTS: tuple[tuple[str, str, Parser], ...] = (
     ("subtotal_raw", "subtotal", try_parse_money),
     ("tax_amount_raw", "tax_amount", try_parse_money),
+    ("shipping_raw", "shipping", try_parse_money),
     ("total_raw", "total", try_parse_money),
     ("tax_rate_raw", "tax_rate", try_parse_rate),
 )
@@ -36,6 +37,38 @@ LINE_AMOUNTS: tuple[tuple[str, str, Parser], ...] = (
     ("unit_price_raw", "unit_price", try_parse_money),
     ("stated_amount_raw", "stated_amount", try_parse_money),
 )
+
+
+def parse_quantities(invoice: Invoice) -> Invoice:
+    """Fill `quantity` from `quantity_raw` where the model left it null.
+
+    The same raw/parsed split as amounts and dates, and it was missing. A model told
+    repeatedly to put values in `*_raw` fields will sometimes generalise and do it for
+    quantity too -- reasonably, since that is the pattern it was shown -- and without
+    this the quantity is simply lost. The invoice then reports "no readable quantity"
+    for a line that stated one perfectly clearly.
+
+    Found by running the corpus: INV-1006, a documented-clean invoice, was rejected for
+    a missing quantity that was present in the document and present in `quantity_raw`.
+
+    A raw value that is not an integer stays unparsed, which is the point -- "a dozen"
+    should reach a DATA_INTEGRITY finding that can quote it, not be guessed at.
+    """
+    lines = [_parse_quantity(line) for line in invoice.line_items]
+
+    if lines == invoice.line_items:
+        return invoice
+    return invoice.model_copy(update={"line_items": lines})
+
+
+def _parse_quantity(line: LineItem) -> LineItem:
+    if line.quantity is not None or not line.quantity_raw:
+        return line
+
+    try:
+        return line.model_copy(update={"quantity": int(line.quantity_raw.strip())})
+    except ValueError:
+        return line
 
 
 def parse_amounts(invoice: Invoice) -> Invoice:
@@ -76,38 +109,55 @@ def unparsed_amount_findings(invoice: Invoice) -> list[Finding]:
     faithfully, the parser could not turn it into a number, and this says so with the
     original text attached.
 
-    CRITICAL, because an invoice whose total cannot be read is not one to pay. The
-    alternative -- letting a retry quietly rewrite it as 3500.00 -- produces a payment
-    nobody can trace back to what the document actually said.
+    **Severity depends on which amount it is, and the distinction is the point.**
+
+    An unreadable *total* is CRITICAL: you cannot pay an amount you cannot read, and
+    letting a retry quietly rewrite it as 3500.00 would produce a payment nobody could
+    trace back to the document.
+
+    Everything else is a WARN. INV-1012 is the case that taught me the difference -- its
+    total reads perfectly at $9,975.00, and it is line 2's extended amount that has the
+    letter O. Rejecting an entire invoice because one line's arithmetic is mistyped,
+    when the quantity, the unit price and the total are all legible, is out of
+    proportion to the problem. It is worth a human's glance, not a refusal.
     """
     findings: list[Finding] = []
 
     for raw_field, parsed_field, _ in INVOICE_AMOUNTS:
         raw = getattr(invoice, raw_field)
-        if raw is not None and getattr(invoice, parsed_field) is None:
-            findings.append(
-                Finding(
-                    code=FindingCode.DATA_INTEGRITY,
-                    severity=Severity.CRITICAL,
-                    message=f"Stated {parsed_field.replace('_', ' ')} is not a number.",
-                    evidence=f"{parsed_field}: {raw!r}",
-                )
+        if raw is None or getattr(invoice, parsed_field) is not None:
+            continue
+
+        findings.append(
+            Finding(
+                code=FindingCode.DATA_INTEGRITY,
+                # Only the total blocks payment on its own. A subtotal or tax line that
+                # cannot be read silences the arithmetic check, which is a loss of
+                # verification rather than evidence of a problem.
+                severity=(
+                    Severity.CRITICAL if parsed_field == "total" else Severity.WARN
+                ),
+                message=f"Stated {parsed_field.replace('_', ' ')} is not a number.",
+                evidence=f"{parsed_field}: {raw!r}",
             )
+        )
 
     for index, line in enumerate(invoice.line_items, start=1):
         for raw_field, parsed_field, _ in LINE_AMOUNTS:
             raw = getattr(line, raw_field)
-            if raw is not None and getattr(line, parsed_field) is None:
-                findings.append(
-                    Finding(
-                        code=FindingCode.DATA_INTEGRITY,
-                        severity=Severity.CRITICAL,
-                        message=(
-                            f"Line {index} states a "
-                            f"{parsed_field.replace('_', ' ')} that is not a number."
-                        ),
-                        evidence=f"{line.raw_name}: {raw!r}",
-                    )
+            if raw is None or getattr(line, parsed_field) is not None:
+                continue
+
+            findings.append(
+                Finding(
+                    code=FindingCode.DATA_INTEGRITY,
+                    severity=Severity.WARN,
+                    message=(
+                        f"Line {index} states a "
+                        f"{parsed_field.replace('_', ' ')} that is not a number."
+                    ),
+                    evidence=f"{line.raw_name}: {raw!r}",
                 )
+            )
 
     return findings

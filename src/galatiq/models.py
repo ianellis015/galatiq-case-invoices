@@ -357,6 +357,15 @@ class Invoice(BaseModel):
     tax_rate: ParsedRate = None
     tax_amount_raw: str | None = None
     tax_amount: ParsedMoney = None
+    # Charges beyond tax. INV-1010 states "Shipping: $150.00", and without a field
+    # for it the total reconciliation is arithmetically correct and wrong: it reports
+    # a $150 discrepancy on an invoice that adds up perfectly.
+    #
+    # One field rather than a general adjustments list, because shipping is what the
+    # corpus contains. Handling or freight would map here too; a discount would need
+    # its own treatment, since a negative charge is a different conversation.
+    shipping_raw: str | None = None
+    shipping: ParsedMoney = None
     total_raw: str | None = None
     total: ParsedMoney = None
 
@@ -428,6 +437,56 @@ class ApprovalDecision(BaseModel):
     # Bounded because a score outside 0-100 is a malformed response, not a strong
     # opinion. This is a shape constraint, not a judgement about the invoice.
     risk_score: int = Field(default=0, ge=0, le=100)
+
+
+class RunRecord(BaseModel):
+    """What happened to one document, start to finish.
+
+    One per *document*, not per invoice — INV-1011 arrives as both a PDF and a text file,
+    and they are two runs of two different files that happen to describe the same
+    invoice. Collapsing them would hide work that was done.
+
+    This is what the batch summary aggregates and what `--json` emits. It exists so the
+    business claim can be made from measurements rather than from an estimate: N invoices,
+    $X of bad payments prevented, this many seconds each against a five-day baseline.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    source_path: str
+    source_format: str | None = None
+
+    invoice_number: str | None = None
+    vendor: str | None = None
+    usd_total: OptionalMoney = None
+
+    outcome: Outcome | None = None
+    rationale: str = ""
+    policy_refs: list[str] = Field(default_factory=list)
+    risk_score: int = 0
+
+    findings: list[Finding] = Field(default_factory=list)
+    payment_status: PaymentStatus | None = None
+
+    # True when the run is suspended at a human-review pause and can be resumed. The
+    # distinction matters for the summary: a held invoice is pending, not prevented.
+    awaiting_review: bool = False
+
+    latency_ms: int = 0
+    provider: str | None = None
+    model: str | None = None
+
+    # A document that failed outright rather than reaching a decision. Should be empty;
+    # if it is not, the summary says so rather than quietly reporting a smaller batch.
+    error: str | None = None
+
+    @property
+    def critical_count(self) -> int:
+        return sum(1 for f in self.findings if f.severity == Severity.CRITICAL)
+
+    @property
+    def warn_count(self) -> int:
+        return sum(1 for f in self.findings if f.severity == Severity.WARN)
 
 
 class PaymentResult(BaseModel):

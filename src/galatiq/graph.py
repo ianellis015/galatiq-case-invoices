@@ -20,6 +20,7 @@ with an integer comparison.
 """
 
 from contextlib import contextmanager
+from datetime import date
 from pathlib import Path
 from typing import Any, Callable, Iterator, Literal
 
@@ -224,7 +225,7 @@ def finalize_node(state: InvoiceState) -> dict[str, Any]:
     return {"findings": findings}
 
 
-def make_prepare_checks_node(connect_db: Callable[[], Any]):
+def make_prepare_checks_node(connect_db: Callable[[], Any], as_of: date | None):
     """Snapshot everything the checks are allowed to know, once.
 
     Before the fan-out rather than inside it: seven concurrent database reads become
@@ -236,7 +237,7 @@ def make_prepare_checks_node(connect_db: Callable[[], Any]):
     def prepare_checks_node(state: InvoiceState) -> dict[str, Any]:
         conn = connect_db()
         try:
-            return {"check_context": snapshot(conn).to_snapshot()}
+            return {"check_context": snapshot(conn, today=as_of).to_snapshot()}
         finally:
             conn.close()
 
@@ -434,14 +435,28 @@ def make_hold_node(interactive: bool):
                     ],
                 }
             )
-            if verdict == "approve":
-                return {"decision": decision.model_copy(
-                    update={"outcome": Outcome.APPROVED}
-                )}
-            if verdict == "reject":
-                return {"decision": decision.model_copy(
-                    update={"outcome": Outcome.REJECTED}
-                )}
+            # Both spellings, because the caller's vocabulary and the graph's do not
+            # have to match and a reviewer typing "deny" should not silently do nothing.
+            answer = str(verdict).strip().lower()
+
+            if answer in ("approve", "approved", "yes", "y"):
+                return {
+                    "decision": decision.model_copy(
+                        update={
+                            "outcome": Outcome.APPROVED,
+                            "rationale": f"[Approved by reviewer] {decision.rationale}",
+                        }
+                    )
+                }
+            if answer in ("deny", "denied", "reject", "rejected", "no", "n"):
+                return {
+                    "decision": decision.model_copy(
+                        update={
+                            "outcome": Outcome.REJECTED,
+                            "rationale": f"[Denied by reviewer] {decision.rationale}",
+                        }
+                    )
+                }
 
         return {
             "payment": PaymentResult(
@@ -520,6 +535,30 @@ def after_approval_critic(
     return "hold"
 
 
+def after_hold(state: InvoiceState) -> Literal["pay", "reject", "__end__"]:
+    """Where a held invoice goes once a human has answered.
+
+    On the way in, `interrupt()` suspends the node before this runs, so a run that is
+    still waiting never reaches here. On resume the node completes with the reviewer's
+    verdict applied, and the invoice takes the same paths an automatic decision would --
+    approving pays through the same idempotent ledger write, denying logs the same
+    reasoned rejection.
+
+    Reusing the terminals rather than paying inline is deliberate: a human approval and
+    an automatic one should be indistinguishable downstream, including in the audit
+    trail.
+    """
+    decision = state.get("decision")
+
+    if decision is None:
+        return END
+    if decision.outcome is Outcome.APPROVED:
+        return "pay"
+    if decision.outcome is Outcome.REJECTED:
+        return "reject"
+    return END
+
+
 def after_critic(state: InvoiceState) -> Literal["extract", "finalize"]:
     """Re-read the document, or finish.
 
@@ -551,6 +590,7 @@ def build_graph(
     interactive: bool = False,
     provider: str | None = None,
     model: str | None = None,
+    as_of: date | None = None,
 ):
     """Compile the pipeline.
 
@@ -569,7 +609,9 @@ def build_graph(
     builder.add_node("extract", make_extract_node(client))
     builder.add_node("extract_critic", make_critic_node(client))
     builder.add_node("finalize", finalize_node)
-    builder.add_node("prepare_checks", make_prepare_checks_node(connect_db or connect))
+    builder.add_node(
+        "prepare_checks", make_prepare_checks_node(connect_db or connect, as_of)
+    )
     builder.add_node("normalize", make_normalize_node(client))
     builder.add_node("merge_findings", merge_findings_node)
 
@@ -632,7 +674,9 @@ def build_graph(
 
     builder.add_edge("pay", END)
     builder.add_edge("reject", END)
-    builder.add_edge("hold", END)
+    builder.add_conditional_edges(
+        "hold", after_hold, {"pay": "pay", "reject": "reject", END: END}
+    )
 
     return builder.compile(checkpointer=checkpointer)
 

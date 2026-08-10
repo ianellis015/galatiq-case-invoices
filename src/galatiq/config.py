@@ -51,6 +51,13 @@ MAX_CRITIC_ATTEMPTS = int(os.environ.get("MAX_CRITIC_ATTEMPTS", "2"))
 # the same reasoning applies: enough for a genuine second look, not enough to deliberate.
 MAX_REFLECT_ATTEMPTS = int(os.environ.get("MAX_REFLECT_ATTEMPTS", "2"))
 
+# Documents processed at once. Safe because inventory is read-only and validation is
+# a pure function of the invoice plus a snapshot -- the property that makes batch runs
+# order-independent is the same one that makes them parallelisable.
+#
+# Eight is comfortably below where SQLite write contention shows up at this scale.
+DEFAULT_CONCURRENCY = int(os.environ.get("GALATIQ_CONCURRENCY", "8"))
+
 
 # --- LLM ---------------------------------------------------------------------
 #

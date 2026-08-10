@@ -14,7 +14,7 @@ right.
 from galatiq.agents.prompts import extraction_messages
 from galatiq.dates import parse_invoice_dates
 from galatiq.llm import AGENT_EXCLUDED_FIELDS, LLMClient, LLMResponseError
-from galatiq.amounts import parse_amounts
+from galatiq.amounts import parse_amounts, parse_quantities
 from galatiq.models import Invoice
 
 
@@ -90,5 +90,5 @@ def extract_invoice(
         update={"source_path": source_path, "source_format": source_format}
     )
 
-    return ExtractionOutcome(invoice=parse_amounts(parse_invoice_dates(invoice)))
+    return ExtractionOutcome(invoice=parse_quantities(parse_amounts(parse_invoice_dates(invoice))))
 

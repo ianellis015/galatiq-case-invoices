@@ -117,24 +117,33 @@ def _check_total(invoice: Invoice) -> list[Finding]:
         return []
 
     tax = invoice.tax_amount if invoice.tax_amount is not None else Decimal("0")
-    computed = invoice.subtotal + tax
+
+    # Shipping counts toward the total but not toward the subtotal, which is the whole
+    # reason it has its own field. INV-1010 states 6,700 + 335 tax + 150 shipping =
+    # 7,185, and without this term the check reports a $150 discrepancy on an invoice
+    # that adds up perfectly -- arithmetically correct and completely wrong.
+    shipping = invoice.shipping if invoice.shipping is not None else Decimal("0")
+
+    computed = invoice.subtotal + tax + shipping
 
     if within_tolerance(computed, invoice.total):
         return []
 
     difference = invoice.total - computed
+    parts = f"{invoice.subtotal} + {tax} tax"
+    if shipping:
+        parts += f" + {shipping} shipping"
 
     return [
         Finding(
             code=FindingCode.MATH_MISMATCH,
             severity=Severity.CRITICAL,
             message=(
-                f"Subtotal {invoice.subtotal} plus tax {tax} is {computed}, but the "
-                f"invoice states a total of {invoice.total} "
-                f"(unexplained {difference})."
+                f"{parts} is {computed}, but the invoice states a total of "
+                f"{invoice.total} (unexplained {difference})."
             ),
             evidence=(
-                f"{invoice.subtotal} + {tax} = {computed}, stated {invoice.total}, "
+                f"{parts} = {computed}, stated {invoice.total}, "
                 f"difference {difference}"
             ),
         )

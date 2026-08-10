@@ -84,8 +84,10 @@ they can only work if what you report is faithful.
 - Arithmetic that does not add up is not yours to fix. Report the stated figures.
 - Include every line item, including repeated ones. If the same product appears three
   times, that is three line items.
-- Shipping, handling and discount lines are not products. Leave them out of
-  `line_items`; note them in `notes` if they carry an amount.
+- Shipping, handling and freight are not products. Leave them out of `line_items`
+  and put the amount in `shipping_raw`. A shipping line counted as a product would
+  be checked against inventory, which it does not have.
+- Discounts and anything else that is neither a product nor shipping go in `notes`.
 - Free text that is not a field -- remarks, terms, urgency language -- goes in `notes`.
 
 If the document is not an invoice, or you cannot find invoice content in it, return the
