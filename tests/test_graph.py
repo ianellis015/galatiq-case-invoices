@@ -15,10 +15,17 @@ from decimal import Decimal
 from pathlib import Path
 
 from galatiq.agents import Critique, Discrepancy
+from galatiq.agents.approval_critic import ApprovalCritique
 from galatiq.store.db import connect, init_db
 from galatiq.store.seed import seed_inventory
-from galatiq.config import MAX_CRITIC_ATTEMPTS, MAX_SCHEMA_ATTEMPTS, PROJECT_ROOT
+from galatiq.config import (
+    MAX_CRITIC_ATTEMPTS,
+    MAX_REFLECT_ATTEMPTS,
+    MAX_SCHEMA_ATTEMPTS,
+    PROJECT_ROOT,
+)
 from galatiq.graph import (
+    after_approval_critic,
     after_critic,
     after_extract,
     build_graph,
@@ -26,13 +33,25 @@ from galatiq.graph import (
     thread_for,
 )
 from galatiq.llm import LLMResponseError
-from galatiq.models import FindingCode, Invoice, LineItem, Severity
+from galatiq.models import (
+    ApprovalDecision,
+    FindingCode,
+    Invoice,
+    LineItem,
+    Outcome,
+    PaymentStatus,
+    Severity,
+)
 from galatiq.state import initial_state
 
 from conftest import FakeLLM
 
 INVOICES = PROJECT_ROOT / "data" / "invoices"
 ADVERSARIAL = PROJECT_ROOT / "data" / "adversarial"
+
+
+def sound_critique():
+    return Critique(verdict="PARSE_SOUND", reasoning="Transcription matches.")
 
 
 def misparse(**kwargs):
@@ -127,7 +146,7 @@ class TestHappyPath:
         state = run(client, INVOICES / "invoice_1001.txt")
 
         assert state["invoice"].invoice_number == "INV-1001"
-        assert client.call_count == 2  # one extraction, one audit
+        assert client.extraction_calls == 2  # one extraction, one audit
         assert extraction_findings(state) == []
 
     def test_the_document_is_actually_read_from_disk(self, sample_invoice, sound):
@@ -169,7 +188,7 @@ class TestSchemaRetryLoop:
 
         state = run(client, INVOICES / "invoice_1001.txt")
 
-        assert client.call_count == MAX_SCHEMA_ATTEMPTS
+        assert client.extraction_calls == MAX_SCHEMA_ATTEMPTS
         assert state["schema_attempts"] == MAX_SCHEMA_ATTEMPTS
 
     def test_exhaustion_still_produces_an_invoice(self):
@@ -203,7 +222,7 @@ class TestSchemaRetryLoop:
 
         run(client, INVOICES / "invoice_1001.txt")
 
-        assert client.call_count == MAX_SCHEMA_ATTEMPTS
+        assert client.extraction_calls == MAX_SCHEMA_ATTEMPTS
 
 
 class TestCriticLoop:
@@ -225,7 +244,7 @@ class TestCriticLoop:
 
         state = run(client, INVOICES / "invoice_1001.txt")
 
-        assert client.call_count == 4
+        assert client.extraction_calls == 4
         assert state["critic_attempts"] == 1
         assert "line_items.0.quantity" in client.calls[2].prompt
 
@@ -269,7 +288,7 @@ class TestDocumentInconsistent:
 
         state = run(client, INVOICES / "invoice_1009.json")
 
-        assert client.call_count == 2
+        assert client.extraction_calls == 2
         assert state["critic_attempts"] == 0
 
     def test_the_inconsistency_travels_downstream(self, sample_invoice, inconsistent):
@@ -288,7 +307,7 @@ class TestUnreadableDocuments:
 
         state = run(client, ADVERSARIAL / "invoice_A002.bin")
 
-        assert client.call_count == 0
+        assert client.extraction_calls == 0
         assert isinstance(state["invoice"], Invoice)
 
     def test_load_findings_survive_to_the_end(self):
@@ -306,7 +325,7 @@ class TestUnreadableDocuments:
 
         state = run(client, ADVERSARIAL / "invoice_A001.yaml")
 
-        assert client.call_count == 2
+        assert client.extraction_calls == 2
         assert FindingCode.UNSUPPORTED_FORMAT in [f.code for f in state["findings"]]
 
 
@@ -512,8 +531,153 @@ class TestValidationFanOut:
 
         state = run(client, ADVERSARIAL / "invoice_A002.bin")
 
-        assert client.call_count == 0
+        assert client.extraction_calls == 0
         assert FindingCode.DATA_INTEGRITY in codes(state)
+
+
+class TestAfterApprovalCritic:
+    """Routing for the second loop and the three terminals — plain dicts, no graph."""
+
+    def _decision(self, outcome):
+        return ApprovalDecision(outcome=outcome, rationale="x")
+
+    def test_approved_pays(self):
+        state = {"decision": self._decision(Outcome.APPROVED), "reflect_attempts": 0}
+        assert after_approval_critic(state) == "pay"
+
+    def test_rejected_rejects(self):
+        state = {"decision": self._decision(Outcome.REJECTED), "reflect_attempts": 0}
+        assert after_approval_critic(state) == "reject"
+
+    def test_held_holds(self):
+        state = {
+            "decision": self._decision(Outcome.HELD_FOR_REVIEW),
+            "reflect_attempts": 0,
+        }
+        assert after_approval_critic(state) == "hold"
+
+    def test_a_missed_signal_reconsiders(self):
+        state = {
+            "decision": self._decision(Outcome.APPROVED),
+            "approval_critique": ApprovalCritique(
+                verdict="MISSED_SIGNALS", reasoning="x", missed=["y"]
+            ),
+            "reflect_attempts": 0,
+        }
+        assert after_approval_critic(state) == "approve"
+
+    def test_the_budget_stops_reconsidering(self):
+        state = {
+            "decision": self._decision(Outcome.APPROVED),
+            "approval_critique": ApprovalCritique(
+                verdict="MISSED_SIGNALS", reasoning="x", missed=["y"]
+            ),
+            "reflect_attempts": MAX_REFLECT_ATTEMPTS,
+        }
+        assert after_approval_critic(state) == "pay"
+
+    def test_no_decision_holds(self):
+        """Whatever went wrong, a human should look at it."""
+        assert after_approval_critic({"decision": None}) == "hold"
+
+
+class TestApprovalAndPayment:
+    """End to end, through to a terminal."""
+
+    def _run(self, invoice, client=None, findings_client=None):
+        return run(client or FakeLLM(invoice, sound_critique()), INVOICES / "invoice_1001.txt")
+
+    def test_a_clean_small_invoice_is_paid(self):
+        invoice = Invoice(
+            invoice_number="INV-PAY-1", vendor="Widgets Inc.",
+            total="2500.00", currency="USD",
+            line_items=[LineItem(raw_name="WidgetA", quantity=10, unit_price="250.00")],
+            due_date_raw="2099-01-01",
+        )
+
+        state = self._run(invoice)
+
+        assert state["decision"].outcome == Outcome.APPROVED
+        assert state["payment"].status == PaymentStatus.PAID
+
+    def test_a_large_clean_invoice_is_held(self):
+        """Correctness decides approve-vs-reject; size decides automatic-vs-human."""
+        invoice = Invoice(
+            invoice_number="INV-PAY-2", vendor="Widgets Inc.",
+            total="50000.00", currency="USD",
+            line_items=[LineItem(raw_name="WidgetA", quantity=10, unit_price="250.00")],
+            due_date_raw="2099-01-01",
+        )
+
+        state = self._run(invoice)
+
+        assert state["decision"].outcome == Outcome.HELD_FOR_REVIEW
+        assert state["payment"].status == PaymentStatus.NOT_ATTEMPTED
+        assert "Over $10,000" in state["decision"].rationale
+
+    def test_a_broken_invoice_is_rejected_with_reasoning(self):
+        invoice = Invoice(
+            invoice_number="INV-PAY-3", vendor="Acme",
+            total="5000.00", currency="USD",
+            line_items=[LineItem(raw_name="WidgetA", quantity=999, unit_price="250.00")],
+            due_date_raw="2099-01-01",
+        )
+
+        state = self._run(invoice)
+
+        assert state["decision"].outcome == Outcome.REJECTED
+        assert state["payment"].status == PaymentStatus.NOT_ATTEMPTED
+        assert state["decision"].rationale
+        assert state["decision"].policy_refs
+
+    def test_an_unknown_item_is_rejected(self):
+        """INV-1016's WidgetC. The normalizer refuses to guess, so it stays unknown."""
+        invoice = Invoice(
+            invoice_number="INV-PAY-4", vendor="Widgets Inc.",
+            total="1050.00", currency="USD",
+            line_items=[LineItem(raw_name="WidgetC", quantity=3, unit_price="350.00")],
+            due_date_raw="2099-01-01",
+        )
+
+        state = self._run(invoice)
+
+        assert state["decision"].outcome == Outcome.REJECTED
+        assert FindingCode.UNKNOWN_ITEM in codes(state)
+
+    def test_the_same_invoice_twice_pays_once(self):
+        """TP4, through the whole graph."""
+        invoice = Invoice(
+            invoice_number="INV-PAY-DUP", vendor="Widgets Inc.",
+            total="1000.00", currency="USD",
+            line_items=[LineItem(raw_name="WidgetA", quantity=4, unit_price="250.00")],
+            due_date_raw="2099-01-01",
+        )
+
+        first = self._run(invoice)
+        second = self._run(invoice)
+
+        assert first["payment"].status == PaymentStatus.PAID
+        # The duplicate check sees the ledger row on the second pass and rejects before
+        # payment is reached, which is the reason rather than the mechanism -- the
+        # UNIQUE constraint would have stopped it regardless.
+        assert second["payment"].status == PaymentStatus.NOT_ATTEMPTED
+        assert second["decision"].outcome == Outcome.REJECTED
+
+    def test_every_terminal_records_a_payment_result(self):
+        """No path reaches END without saying what happened to the money."""
+        for total, expected in [
+            ("2500.00", PaymentStatus.PAID),
+            ("50000.00", PaymentStatus.NOT_ATTEMPTED),
+        ]:
+            invoice = Invoice(
+                invoice_number=f"INV-TERM-{total}", vendor="Widgets Inc.",
+                total=total, currency="USD",
+                line_items=[
+                    LineItem(raw_name="WidgetA", quantity=10, unit_price="250.00")
+                ],
+                due_date_raw="2099-01-01",
+            )
+            assert self._run(invoice)["payment"].status == expected
 
 
 class TestCheckpointing:

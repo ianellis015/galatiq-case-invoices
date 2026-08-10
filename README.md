@@ -9,10 +9,9 @@ correctness. The model reads messy documents into structure and writes human-leg
 reasoning. It never does arithmetic, never queries stock, never evaluates a
 threshold, and never decides to release a payment.
 
-> **Status:** in progress. Ingestion and extraction run end to end — any document
-> format in, a typed `Invoice` out, with two bounded self-correction loops and a
-> durable audit trail. Validation, approval and payment are not yet implemented. See
-> [Current status](#current-status).
+> **Status:** in progress. The pipeline runs end to end — any document format in, and
+> a payment, a reasoned rejection, or an invoice held for a human out. The CLI is the
+> remaining piece. See [Current status](#current-status).
 
 ---
 
@@ -123,12 +122,14 @@ src/galatiq/
 ├── amounts.py         parsing what a document called an amount
 ├── mapping.py         structural hints, and cross-checking two readings
 ├── fx.py              currency conversion, from a static table
+├── payment.py         releasing money, write-ahead and at most once
 ├── state.py           the shared document every graph node writes to
 ├── graph.py           the pipeline as a state graph
 ├── loaders/           reading any document off disk, in any format
 ├── llm/               the typed interface every agent calls through
 ├── agents/            the nodes that call a model
 ├── checks/            the seven deterministic validation checks
+├── policy/            the approval rules, as configuration
 └── store/
     ├── schema.sql     inventory + ledger tables
     ├── db.py          connections and schema creation
@@ -158,10 +159,12 @@ var/                   runtime database (gitignored, regenerated)
 | LLM provider layer | One typed interface every agent calls through — a pydantic model in, a validated instance out. Grok via the OpenAI-compatible endpoint, with strict structured output and bounded transport retries |
 | Extraction phase | Extractor and extraction critic, running in a LangGraph state graph with two bounded self-correction loops and durable checkpointing |
 | Validation phase | Item normalisation against the catalog, then seven checks fanned out in parallel — stock, arithmetic, integrity, duplicates, dates, currency, fraud |
+| Approval phase | Rules as YAML configuration, an approver that writes the reasoning, and an adversarial critic behind a second bounded reflection loop |
+| Payment | Idempotent ledger write ahead of the payment call, so a crash can delay money but never duplicate it |
 
 **Not yet implemented**
 
-The policy engine, approval, and payment execution.
+The CLI, batch concurrency, and the run-record/reporting layer.
 
 ---
 
@@ -274,6 +277,33 @@ lines, and the snapshot travels in the checkpointed state — so the audit trail
 *"what stock did we see when we rejected this?"* rather than *"what does stock say
 now?"*. `today` is injected for the same reason: a past-due check that calls
 `date.today()` passes today and fails next month.
+
+**The model has veto power, not approval power.** The rules engine is authoritative. The
+approver may reject something the rules would have paid, and may escalate something they
+would have approved. It can never approve something they rejected. The whole guarantee is
+one line — take the more conservative of the two outcomes — and it is tested as an
+exhaustive 3×3 matrix, because it is the single thing standing between a persuasive
+document and a payment.
+
+**Size and correctness are independent axes.** Something wrong with the invoice decides
+approve-versus-reject; the amount decides automatic-versus-human. A clean $100,000 invoice
+is held for a VP, not refused. A $500 invoice with a stock breach is refused. The business
+story is one sentence: automate the small clean invoices, escalate the large ones,
+reject the broken ones with a reason.
+
+**Rules are configuration, within a fixed vocabulary.** `policy/rules.yaml` holds the
+thresholds, bands and effects, and each rule names a condition from a short menu of tested
+Python predicates. A finance lead can retune the threshold or move a signal from "hold" to
+"reject" without a developer; they cannot invent a new *kind* of condition, which would
+mean a config file containing untested logic in the path of every payment.
+
+**The ledger row is written before the payment call.** Pay-then-record loses the record on
+a crash and double-pays on the next run. Record-then-pay leaves a record of a payment that
+did not happen — recoverable by a human reconciling against the bank. Given a choice
+between losing money and delaying it, delay it.
+
+**Payment is not an agent.** It is a tool call behind a deterministic edge, reached only
+when the rules and the model concur. No model is given discretion over releasing funds.
 
 **Document text is data, never instruction.** Invoices are written by vendors, and a
 vendor is not a trusted party. Instructions live in the system message and document
