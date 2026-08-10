@@ -13,6 +13,8 @@ dependencies = [
     "pydantic>=2.13",
     "pdfplumber>=0.11",
     "openai>=2.0",
+    "langgraph>=1.2.10",
+    "langgraph-checkpoint-sqlite>=3.1.1",
 ]
 
 [dependency-groups]
@@ -32,3 +34,9 @@ packages = ["src/galatiq"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+# Live tests hit the real xAI API: they cost money, need a key, and fail when the
+# network is down. Deselected by default so `uv run pytest` stays free, offline and
+# deterministic. Run them deliberately with `-m live`.
+markers = ["live: hits the real xAI API (deselected by default)"]
+addopts = "-m 'not live'"

@@ -28,6 +28,25 @@ VAR_DIR = PROJECT_ROOT / "var"
 # throwaway database.
 DB_PATH = Path(os.environ.get("INVOICE_DB_PATH", VAR_DIR / "invoices.db"))
 
+# LangGraph's checkpointer owns this file and its tables. Kept separate from the
+# inventory/ledger database so replay state can be wiped without touching the
+# idempotency record -- two different lifetimes, two different files.
+AUDIT_DB_PATH = Path(os.environ.get("AUDIT_DB_PATH", VAR_DIR / "audit.db"))
+
+
+# --- self-correction budgets -------------------------------------------------
+#
+# These live here rather than in a prompt on purpose. A prompt saying "only retry
+# twice" is a suggestion a model can ignore, cannot be tested without spending API
+# calls, and is exactly the kind of instruction a hostile document tries to talk
+# past. An integer compared in a routing function is none of those things.
+#
+# Two is deliberate: enough for a genuine correction when the failure is specific
+# ("quantity must be an integer"), not enough to spiral. Past that the invoice goes
+# to a human, which is the right answer for a document the system cannot read.
+MAX_SCHEMA_ATTEMPTS = int(os.environ.get("MAX_SCHEMA_ATTEMPTS", "2"))
+MAX_CRITIC_ATTEMPTS = int(os.environ.get("MAX_CRITIC_ATTEMPTS", "2"))
+
 
 # --- LLM ---------------------------------------------------------------------
 #

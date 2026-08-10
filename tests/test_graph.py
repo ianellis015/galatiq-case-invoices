@@ -1,0 +1,398 @@
+"""Tests for the graph: routing, the two cycles, and end-to-end runs.
+
+Routing functions are tested by calling them with plain dicts — no graph, no model, no
+I/O. That is the point of putting the budgets there: a limit expressed as an integer
+comparison can be proven exhaustively in microseconds, and nothing inside a document can
+argue with it.
+
+The end-to-end tests run real corpus files through a scripted `FakeLLM`, so the loader,
+the nodes, the reducer and the routing all execute for real while the only simulated
+part is the model.
+"""
+
+from decimal import Decimal
+
+from galatiq.agents import Critique, Discrepancy
+from galatiq.config import MAX_CRITIC_ATTEMPTS, MAX_SCHEMA_ATTEMPTS, PROJECT_ROOT
+from galatiq.graph import (
+    after_critic,
+    after_extract,
+    build_graph,
+    run_document,
+    thread_for,
+)
+from galatiq.llm import LLMResponseError
+from galatiq.models import FindingCode, Invoice, LineItem, Severity
+from galatiq.state import initial_state
+
+from conftest import FakeLLM
+
+INVOICES = PROJECT_ROOT / "data" / "invoices"
+ADVERSARIAL = PROJECT_ROOT / "data" / "adversarial"
+
+
+def misparse(**kwargs):
+    return Critique(verdict="MISPARSE_SUSPECTED", reasoning="Quantity misread.", **kwargs)
+
+
+def run(client, path):
+    """Invoke the graph without a checkpointer — faster, and durability has its own test."""
+    graph = build_graph(client)
+    return graph.invoke(initial_state(str(path)))
+
+
+# ---------------------------------------------------------------------------
+# Routing — plain dicts, no graph
+# ---------------------------------------------------------------------------
+
+
+class TestAfterExtract:
+    def test_no_invoice_retries(self):
+        assert after_extract({"invoice": None}) == "extract"
+
+    def test_an_invoice_moves_to_the_audit(self, sample_invoice):
+        assert after_extract({"invoice": sample_invoice}) == "extract_critic"
+
+
+class TestAfterCritic:
+    """Three verdicts, two routes. The collapsing is the design."""
+
+    def test_sound_finishes(self, sound):
+        assert after_critic({"critique": sound, "critic_attempts": 0}) == "finalize"
+
+    def test_inconsistent_finishes(self, inconsistent):
+        """The document is the problem, and reading it again cannot fix it.
+
+        This is the branch that stops INV-1009 from consuming its whole budget.
+        """
+        assert (
+            after_critic({"critique": inconsistent, "critic_attempts": 0}) == "finalize"
+        )
+
+    def test_misparse_retries_while_budget_remains(self):
+        assert after_critic({"critique": misparse(), "critic_attempts": 0}) == "extract"
+
+    def test_misparse_stops_at_the_budget(self):
+        state = {"critique": misparse(), "critic_attempts": MAX_CRITIC_ATTEMPTS}
+        assert after_critic(state) == "finalize"
+
+    def test_no_critique_finishes(self):
+        """The critic was skipped — unreadable document, or a failed extraction."""
+        assert after_critic({"critique": None, "critic_attempts": 0}) == "finalize"
+
+
+# ---------------------------------------------------------------------------
+# End to end
+# ---------------------------------------------------------------------------
+
+
+class TestHappyPath:
+    def test_a_clean_invoice(self, sample_invoice, sound):
+        client = FakeLLM(sample_invoice, sound)
+
+        state = run(client, INVOICES / "invoice_1001.txt")
+
+        assert state["invoice"].invoice_number == "INV-1001"
+        assert client.call_count == 2  # one extraction, one audit
+        assert state["findings"] == []
+
+    def test_the_document_is_actually_read_from_disk(self, sample_invoice, sound):
+        client = FakeLLM(sample_invoice, sound)
+
+        state = run(client, INVOICES / "invoice_1001.txt")
+
+        assert "Widgets Inc." in state["raw_text"]
+
+    def test_a_structured_document_gets_a_hint(self, sample_invoice, sound):
+        client = FakeLLM(sample_invoice, sound)
+
+        state = run(client, INVOICES / "invoice_1006.csv")
+
+        assert state["structural_hint"]["invoice_number"] == "INV-1006"
+        assert "INV-1006" in client.calls[0].prompt
+
+
+class TestSchemaRetryLoop:
+    def test_a_malformed_response_is_retried_with_the_error(self, sample_invoice, sound):
+        client = FakeLLM(
+            LLMResponseError("bad", detail="total: input should be a valid string"),
+            sample_invoice,
+            sound,
+        )
+
+        state = run(client, INVOICES / "invoice_1001.txt")
+
+        assert state["invoice"].invoice_number == "INV-1001"
+        assert state["schema_attempts"] == 1
+        assert "total: input should be a valid string" in client.calls[1].prompt
+
+    def test_the_budget_is_enforced(self):
+        """Two attempts, then stop. Without the counter this loops forever, and each
+        turn of it is an API call."""
+        client = FakeLLM(
+            *[LLMResponseError("bad", detail="broken") for _ in range(MAX_SCHEMA_ATTEMPTS)]
+        )
+
+        state = run(client, INVOICES / "invoice_1001.txt")
+
+        assert client.call_count == MAX_SCHEMA_ATTEMPTS
+        assert state["schema_attempts"] == MAX_SCHEMA_ATTEMPTS
+
+    def test_exhaustion_still_produces_an_invoice(self):
+        """The document has to reach a decision. "We could not read this" is one a
+        human can act on."""
+        client = FakeLLM(
+            *[LLMResponseError("bad", detail="broken") for _ in range(MAX_SCHEMA_ATTEMPTS)]
+        )
+
+        state = run(client, INVOICES / "invoice_1001.txt")
+
+        assert isinstance(state["invoice"], Invoice)
+        assert state["invoice"].invoice_number is None
+
+    def test_exhaustion_is_reported(self):
+        client = FakeLLM(
+            *[LLMResponseError("bad", detail="broken") for _ in range(MAX_SCHEMA_ATTEMPTS)]
+        )
+
+        state = run(client, INVOICES / "invoice_1001.txt")
+        codes = [f.code for f in state["findings"]]
+
+        assert FindingCode.NEEDS_HUMAN_REVIEW in codes
+
+    def test_the_critic_is_not_asked_to_audit_a_failed_extraction(self):
+        """Auditing a structure the extractor never produced costs a call to confirm
+        what is already known."""
+        client = FakeLLM(
+            *[LLMResponseError("bad", detail="broken") for _ in range(MAX_SCHEMA_ATTEMPTS)]
+        )
+
+        run(client, INVOICES / "invoice_1001.txt")
+
+        assert client.call_count == MAX_SCHEMA_ATTEMPTS
+
+
+class TestCriticLoop:
+    def test_a_suspected_misparse_re_extracts(self, sample_invoice, sound):
+        client = FakeLLM(
+            sample_invoice,
+            misparse(
+                discrepancies=[
+                    Discrepancy(
+                        field="line_items.0.quantity",
+                        transcribed="5",
+                        document_says="10",
+                    )
+                ]
+            ),
+            sample_invoice,
+            sound,
+        )
+
+        state = run(client, INVOICES / "invoice_1001.txt")
+
+        assert client.call_count == 4
+        assert state["critic_attempts"] == 1
+        assert "line_items.0.quantity" in client.calls[2].prompt
+
+    def test_the_budget_is_enforced(self, sample_invoice):
+        """Each turn is two API calls, so an unbounded loop is expensive fast."""
+        script = []
+        for _ in range(MAX_CRITIC_ATTEMPTS + 1):
+            script.extend([sample_invoice, misparse()])
+
+        client = FakeLLM(*script)
+        state = run(client, INVOICES / "invoice_1001.txt")
+
+        assert state["critic_attempts"] == MAX_CRITIC_ATTEMPTS
+
+    def test_persistent_suspicion_is_reported(self, sample_invoice):
+        """Neither trusted nor discarded — flagged as uncertain for a human."""
+        script = []
+        for _ in range(MAX_CRITIC_ATTEMPTS + 1):
+            script.extend([sample_invoice, misparse()])
+
+        state = run(FakeLLM(*script), INVOICES / "invoice_1001.txt")
+        codes = [f.code for f in state["findings"]]
+
+        assert FindingCode.EXTRACTION_UNCERTAIN in codes
+
+    def test_a_sound_verdict_costs_no_budget(self, sample_invoice, sound):
+        client = FakeLLM(sample_invoice, sound)
+
+        state = run(client, INVOICES / "invoice_1001.txt")
+
+        assert state["critic_attempts"] == 0
+
+
+class TestDocumentInconsistent:
+    """INV-1009: the case the three-way verdict exists for."""
+
+    def test_no_re_extraction_happens(self, sample_invoice, inconsistent):
+        """The extraction is right and the document is wrong. Re-reading returns the
+        same values, because they are the correct values."""
+        client = FakeLLM(sample_invoice, inconsistent)
+
+        state = run(client, INVOICES / "invoice_1009.json")
+
+        assert client.call_count == 2
+        assert state["critic_attempts"] == 0
+
+    def test_the_inconsistency_travels_downstream(self, sample_invoice, inconsistent):
+        client = FakeLLM(sample_invoice, inconsistent)
+
+        state = run(client, INVOICES / "invoice_1009.json")
+        codes = [f.code for f in state["findings"]]
+
+        assert FindingCode.DOC_INCONSISTENT in codes
+        assert FindingCode.NEEDS_HUMAN_REVIEW not in codes
+
+
+class TestUnreadableDocuments:
+    def test_no_model_calls_at_all(self):
+        client = FakeLLM()
+
+        state = run(client, ADVERSARIAL / "invoice_A002.bin")
+
+        assert client.call_count == 0
+        assert isinstance(state["invoice"], Invoice)
+
+    def test_load_findings_survive_to_the_end(self):
+        """The loader already explained why the document is unreadable. That
+        explanation is what reaches the reviewer."""
+        state = run(FakeLLM(), ADVERSARIAL / "invoice_A002.bin")
+        codes = [f.code for f in state["findings"]]
+
+        assert FindingCode.UNREADABLE_DOCUMENT in codes
+        assert any(f.severity == Severity.CRITICAL for f in state["findings"])
+
+    def test_an_unknown_format_still_reaches_the_model(self, sample_invoice, sound):
+        """A .yaml invoice has no parser and does not need one."""
+        client = FakeLLM(sample_invoice, sound)
+
+        state = run(client, ADVERSARIAL / "invoice_A001.yaml")
+
+        assert client.call_count == 2
+        assert FindingCode.UNSUPPORTED_FORMAT in [f.code for f in state["findings"]]
+
+
+class TestHintCrossCheck:
+    def test_a_dropped_line_item_is_caught(self, sound):
+        """The reason the structural parsers still exist.
+
+        INV-1006 has two line items. A model that returns one produces a plausible,
+        self-consistent, wrong invoice — and the parser is the only thing that would
+        notice.
+        """
+        one_line = Invoice(
+            invoice_number="INV-1006",
+            line_items=[LineItem(raw_name="WidgetB", quantity=3, unit_price="500.00")],
+            subtotal="2750.00",
+            total="2750.00",
+        )
+        client = FakeLLM(one_line, sound)
+
+        state = run(client, INVOICES / "invoice_1006.csv")
+        codes = [f.code for f in state["findings"]]
+
+        assert FindingCode.HINT_DISAGREEMENT in codes
+
+    def test_agreement_is_silent(self, sound):
+        agreeing = Invoice(
+            invoice_number="INV-1006",
+            line_items=[
+                LineItem(raw_name="WidgetA", quantity=5, unit_price="250.00"),
+                LineItem(raw_name="WidgetB", quantity=3, unit_price="500.00"),
+            ],
+            subtotal="2750.00",
+            total="2750.00",
+        )
+
+        state = run(FakeLLM(agreeing, sound), INVOICES / "invoice_1006.csv")
+
+        assert state["findings"] == []
+
+
+class TestOcrDamage:
+    """INV-1012, end to end. The case that broke the first live run."""
+
+    def test_an_unreadable_amount_does_not_crash_the_graph(self, sound):
+        """The model transcribes "$3,500.O0" faithfully — which is what we asked for.
+
+        Before the fix, decimal.InvalidOperation escaped through pydantic and took the
+        node down: an exception where a finding belongs.
+        """
+        damaged = Invoice(invoice_number="INV-1012", total_raw="$3,500.O0")
+        client = FakeLLM(damaged, sound)
+
+        state = run(client, INVOICES / "invoice_1012.txt")
+
+        assert state["invoice"] is not None
+
+    def test_the_damage_is_reported_with_the_original_text(self, sound):
+        """Not silently repaired. A retry that rewrote it as 3500.00 would produce a
+        payment nobody could trace back to what the document actually said."""
+        damaged = Invoice(invoice_number="INV-1012", total_raw="$3,500.O0")
+
+        state = run(FakeLLM(damaged, sound), INVOICES / "invoice_1012.txt")
+        findings = [f for f in state["findings"] if f.code == FindingCode.DATA_INTEGRITY]
+
+        assert len(findings) == 1
+        assert "$3,500.O0" in findings[0].evidence
+        assert state["invoice"].total is None
+        assert state["invoice"].total_raw == "$3,500.O0"
+
+    def test_a_percentage_tax_rate_is_understood(self, sound):
+        """"Tax (6%)" transcribes as "6%", which the money parser rejected — four
+        invoices failed on this in the first live run."""
+        invoice = Invoice(invoice_number="INV-1007", tax_rate_raw="6%")
+
+        state = run(FakeLLM(invoice, sound), INVOICES / "invoice_1007.csv")
+
+        assert state["invoice"].tax_rate == Decimal("0.06")
+        assert not [
+            f for f in state["findings"] if f.code == FindingCode.DATA_INTEGRITY
+        ]
+
+
+class TestFindingsAreNotDuplicated:
+    def test_a_retried_loop_reports_once(self, sound):
+        """`findings` concatenates, so a node running three times contributes three
+        copies. An invoice whose audit trail says the same thing three times reads as
+        three problems, which is why findings are emitted in `finalize`.
+        """
+        one_line = Invoice(
+            invoice_number="INV-1006",
+            line_items=[LineItem(raw_name="WidgetB", quantity=3, unit_price="500.00")],
+        )
+        client = FakeLLM(one_line, misparse(), one_line, sound)
+
+        state = run(client, INVOICES / "invoice_1006.csv")
+        disagreements = [
+            f for f in state["findings"] if f.code == FindingCode.HINT_DISAGREEMENT
+        ]
+
+        assert len(disagreements) == 1
+
+
+class TestCheckpointing:
+    def test_state_is_durable_and_replayable(self, tmp_path, sample_invoice, sound):
+        """The audit trail, for the cost of one argument.
+
+        Snapshots after every node mean "what did the system know before it rejected
+        this" is a question with an exact answer.
+        """
+        client = FakeLLM(sample_invoice, sound)
+        path = str(INVOICES / "invoice_1001.txt")
+
+        state = run_document(client, path, audit_db=tmp_path / "audit.db")
+
+        assert state["invoice"].invoice_number == "INV-1001"
+        assert (tmp_path / "audit.db").exists()
+
+    def test_each_document_gets_its_own_timeline(self):
+        """The twins are genuinely different documents and should not share a history."""
+        pdf = thread_for("data/invoices/invoice_1011.pdf")
+        txt = thread_for("data/invoices/invoice_1011.txt")
+
+        assert pdf["configurable"]["thread_id"] != txt["configurable"]["thread_id"]

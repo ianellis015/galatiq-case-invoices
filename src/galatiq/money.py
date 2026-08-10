@@ -17,7 +17,7 @@ conversion only through this module. Confining it to one file is what lets me cl
 the rest of the system cannot introduce a rounding bug.
 """
 
-from decimal import Decimal, ROUND_HALF_UP
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 
 # Every amount reaching the database or a policy comparison carries this precision.
 CENT = Decimal("0.01")
@@ -75,8 +75,72 @@ def parse_money(value: str | int | Decimal) -> Decimal:
     # "$3,500.O0", a letter O standing in for a zero. Repair belongs upstream in the
     # extractor, where there's document context to justify it. Down here a malformed
     # amount should fail loudly, because guessing wrong changes what gets paid.
-    amount = Decimal(text)
+    #
+    # InvalidOperation is translated to ValueError because it is not one: it inherits
+    # from ArithmeticError, so a caller writing `except ValueError` around this --
+    # which is the obvious thing to write -- would not catch it, and the exception
+    # would escape through pydantic and take down whatever was running. Found exactly
+    # that way, on invoice 1012.
+    try:
+        amount = Decimal(text)
+    except InvalidOperation as exc:
+        raise ValueError(f"not a valid amount: {value!r}") from exc
+
     return -amount if negative else amount
+
+
+def try_parse_money(value: str | int | Decimal | None) -> Decimal | None:
+    """Parse an amount, or return None if it is not one.
+
+    The lenient companion to `parse_money`, for the boundary where a document's text is
+    turned into numbers. An amount that does not parse is a normal property of a real
+    invoice -- INV-1012 states "$3,500.O0" -- and the system's job there is to report it
+    with the original text attached, not to raise.
+
+    Floats still raise. That guard is about our own correctness rather than the
+    document's, and nothing about a messy invoice makes float arithmetic acceptable.
+    """
+    if value is None:
+        return None
+    if isinstance(value, bool) or isinstance(value, float):
+        raise TypeError(
+            f"refusing to build money from {type(value).__name__} ({value!r})"
+        )
+
+    try:
+        return parse_money(value)
+    except ValueError:
+        return None
+
+
+def parse_rate(value: str | int | Decimal) -> Decimal:
+    """Parse a tax rate, accepting either a percentage or a fraction.
+
+    Documents write the same rate two ways. The JSON invoices say `0.07`; the CSVs
+    label a column `Tax (6%)`, and a faithful transcription of that is "6%". Both mean
+    the same number, and normalising the unit here is arithmetic rather than judgement
+    -- 6% and 0.06 are not two readings of a document, they are one value in two
+    notations.
+
+    A bare number is read as a fraction, which is what every non-percent source in the
+    corpus uses. "7" would therefore mean 700%, and nothing in the corpus writes a rate
+    that way -- recorded in the README rather than guessed at, since silently dividing
+    by 100 would be inventing a decimal point the document does not have.
+    """
+    if isinstance(value, str) and value.strip().endswith("%"):
+        return parse_money(value.strip().rstrip("%")) / 100
+
+    return parse_money(value)
+
+
+def try_parse_rate(value: str | int | Decimal | None) -> Decimal | None:
+    """Parse a rate, or return None if it is not one."""
+    if value is None:
+        return None
+    try:
+        return parse_rate(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def round_money(amount: Decimal) -> Decimal:

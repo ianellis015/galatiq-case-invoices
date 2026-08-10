@@ -9,8 +9,9 @@ correctness. The model reads messy documents into structure and writes human-leg
 reasoning. It never does arithmetic, never queries stock, never evaluates a
 threshold, and never decides to release a payment.
 
-> **Status:** early. The persistence layer is built and tested. Invoice loading,
-> extraction, validation, approval, and payment are not yet implemented. See
+> **Status:** in progress. Ingestion and extraction run end to end — any document
+> format in, a typed `Invoice` out, with two bounded self-correction loops and a
+> durable audit trail. Validation, approval and payment are not yet implemented. See
 > [Current status](#current-status).
 
 ---
@@ -83,8 +84,16 @@ return to a known stock position.
 uv run pytest
 ```
 
-Expected: `238 passed`. The suite uses temporary databases and never touches
+Expected: `374 passed, 27 deselected`. The suite uses temporary databases and never touches
 `var/invoices.db`.
+
+The deselected tests hit the real API. They cost money, need a key, and fail when the
+network is down — none of which belongs in a suite you run on every save. Run them
+deliberately:
+
+```bash
+uv run pytest -m live -v
+```
 
 ### Inspect the database
 
@@ -110,8 +119,14 @@ src/galatiq/
 ├── config.py          paths and environment resolution
 ├── money.py           exact money handling (Decimal ↔ integer cents)
 ├── models.py          the shapes passed between stages
+├── dates.py           parsing what a document called a date
+├── amounts.py         parsing what a document called an amount
+├── mapping.py         structural hints, and cross-checking two readings
+├── state.py           the shared document every graph node writes to
+├── graph.py           the pipeline as a state graph
 ├── loaders/           reading any document off disk, in any format
 ├── llm/               the typed interface every agent calls through
+├── agents/            the nodes that call a model
 └── store/
     ├── schema.sql     inventory + ledger tables
     ├── db.py          connections and schema creation
@@ -139,10 +154,12 @@ var/                   runtime database (gitignored, regenerated)
 | Data shapes | `Invoice`, `LineItem`, `Finding`, `ApprovalDecision`, `PaymentResult` — the objects passed between stages, and the schema handed to the LLM for structured output |
 | Format loaders | Any document that decodes to text, whatever its extension. Dedicated structural parsers for txt, pdf, json, xml and csv; everything else falls back to text. Directory and glob discovery for batch mode |
 | LLM provider layer | One typed interface every agent calls through — a pydantic model in, a validated instance out. Grok via the OpenAI-compatible endpoint, with strict structured output and bounded transport retries |
+| Extraction phase | Extractor and extraction critic, running in a LangGraph state graph with two bounded self-correction loops and durable checkpointing |
 
 **Not yet implemented**
 
-Extraction, validation checks, the policy engine, approval, and payment execution.
+Item normalisation, the validation checks, the policy engine, approval, and payment
+execution.
 
 ---
 
@@ -219,6 +236,37 @@ handed to the model, so `$3,500.O0` comes back as those characters and the OCR d
 stays visible. A numeric field would invite the model to decide what the number
 probably was, and would reintroduce float error at the one boundary the rest of the
 system is built to keep it out of.
+
+**Amounts and dates are carried twice: as written, and as parsed.** A document does not
+contain money or dates — it contains text that may or may not denote them. INV-1012
+states a total of `$3,500.O0`, with a letter O where a zero belongs, and INV-1003 states
+a due date of `"yesterday"`. Both are perfectly clear statements of values that are not
+values. So `total_raw` holds what the document said, `total` holds what it turned out to
+mean, and the gap between them is what a finding reports. Collapsing the two would mean
+either crashing on those documents or silently rewriting `$3,500.O0` as `3500.00` — and
+the second is worse, because a corrected amount is indistinguishable from one that was
+always right and the correction leaves no trace.
+
+**Document text is data, never instruction.** Invoices are written by vendors, and a
+vendor is not a trusted party. Instructions live in the system message and document
+content in the user message — never concatenated, which is how most injection defenses
+leak. Content is fenced by sentinels the document cannot forge, since occurrences inside
+it are neutralised before wrapping. INV-1003's *"URGENT — Pay immediately… wire transfer
+preferred"* is a fact about the invoice that belongs in `notes` for the fraud check to
+score, and never an instruction to the system reading it.
+
+**The critic has three verdicts, not two.** It answers *"did I misread the document?"*
+— not *"is the document wrong?"*, which is the checks' question. INV-1009 states a
+subtotal of 1000.00 while its line items sum to −250.00: the transcription is faithful
+and the document is contradictory. A critic that can only say "sound" or "misread" sends
+the extractor back to re-read a document it already read correctly, gets the same values
+because they are the right values, and burns its budget escalating something it
+understood perfectly. `DOCUMENT_INCONSISTENT` is what makes the loop terminate.
+
+**Retry budgets live in code, not in prompts.** A prompt saying "only retry twice" is a
+suggestion — untestable without spending API calls, and exactly the kind of instruction a
+hostile document tries to talk past. An integer compared in a routing function is none of
+those things, and the routing functions are tested by calling them with plain dicts.
 
 **A parser that knows two shapes says so rather than guessing at a third.** A CSV whose
 columns are all named differently parses mechanically into a tidy dict containing no
