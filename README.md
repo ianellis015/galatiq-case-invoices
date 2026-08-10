@@ -9,9 +9,10 @@ correctness. The model reads messy documents into structure and writes human-leg
 reasoning. It never does arithmetic, never queries stock, never evaluates a
 threshold, and never decides to release a payment.
 
-> **Status:** in progress. The pipeline runs end to end — any document format in, and
-> a payment, a reasoned rejection, or an invoice held for a human out. The CLI is the
-> remaining piece. See [Current status](#current-status).
+> **Status:** working end to end. Any document format in; a payment, a reasoned
+> rejection, or an invoice held for a human out. Over the provided corpus: 20 documents
+> in 2m24s, $203,758 of bad payments prevented. See
+> [Current status](#current-status).
 
 ---
 
@@ -57,6 +58,41 @@ You do **not** need to activate the virtual environment — every command below 
 
 ## Running
 
+### Process invoices
+
+```bash
+uv run python main.py --invoice_path=data/invoices/invoice_1001.txt
+```
+
+One invoice: what was extracted, every finding with its evidence, and the decision with
+its reasoning.
+
+(With the virtual environment activated, `python main.py --invoice_path=…` works exactly
+as the brief writes it. The `uv run` prefix just saves activating it.)
+
+```bash
+uv run python main.py --invoice_path=data/invoices/ --as-of 2026-02-01
+```
+
+A directory or a glob: processed concurrently, one line per document, then a summary.
+Invoices needing a human are collected during the run and reviewed at the end — approve,
+deny, or skip. Skipping leaves the run suspended, so a later session picks it back up.
+
+**`--as-of` matters.** The provided corpus is dated January 2026, so without it every
+invoice reports as months past due and the signal is worthless.
+
+| Flag | |
+|---|---|
+| `--as-of DATE` | Reference date for due-date checks |
+| `--no-interactive` | Skip the review queue; held invoices are recorded and the run ends |
+| `--concurrency N` / `-j N` | Documents at once (default 8) |
+| `--json` | Run records as JSON instead of a report |
+
+Exit codes: `0` all approved, `1` something needs attention, `2` a failure to run.
+
+Worth [resetting](#reset) before a demo, or invoices paid on an earlier run come back as
+duplicates — which is correct, and confusing.
+
 ### Seed the database
 
 ```bash
@@ -83,7 +119,7 @@ return to a known stock position.
 uv run pytest
 ```
 
-Expected: `448 passed, 27 deselected`. The suite uses temporary databases and never touches
+Expected: `576 passed, 27 deselected`. The suite uses temporary databases and never touches
 `var/invoices.db`.
 
 The deselected tests hit the real API. They cost money, need a key, and fail when the
@@ -104,10 +140,21 @@ sqlite3 var/invoices.db "SELECT * FROM ledger;"
 ### Reset
 
 ```bash
-rm var/invoices.db && uv run python -m galatiq.store.seed
+rm -f var/invoices.db var/audit.db && uv run python -m galatiq.store.seed
 ```
 
 `var/` is gitignored and regenerated, so deleting it costs nothing.
+
+To keep the seeded inventory but clear the payment history — the usual thing before a
+demo, since re-running a batch otherwise reports already-paid invoices as duplicates:
+
+```bash
+uv run python -c "
+from galatiq.store.db import connection
+with connection() as c:
+    c.execute('DELETE FROM ledger'); c.commit()
+"
+```
 
 ---
 
@@ -125,6 +172,7 @@ src/galatiq/
 ├── payment.py         releasing money, write-ahead and at most once
 ├── state.py           the shared document every graph node writes to
 ├── graph.py           the pipeline as a state graph
+├── cli/               the command line: batching, review queue, rendering
 ├── loaders/           reading any document off disk, in any format
 ├── llm/               the typed interface every agent calls through
 ├── agents/            the nodes that call a model
@@ -135,6 +183,7 @@ src/galatiq/
     ├── db.py          connections and schema creation
     ├── seed.py        inventory seed data
     └── repository.py  all reads and writes
+main.py                entry point — the command the brief names
 tests/                 pytest suite
 data/invoices/         the provided test corpus (16 invoices, 20 files)
 data/adversarial/      my own fixtures, in formats the corpus does not contain
@@ -161,10 +210,11 @@ var/                   runtime database (gitignored, regenerated)
 | Validation phase | Item normalisation against the catalog, then seven checks fanned out in parallel — stock, arithmetic, integrity, duplicates, dates, currency, fraud |
 | Approval phase | Rules as YAML configuration, an approver that writes the reasoning, and an adversarial critic behind a second bounded reflection loop |
 | Payment | Idempotent ledger write ahead of the payment call, so a crash can delay money but never duplicate it |
+| CLI | `python main.py --invoice_path=…` for a file, a directory or a glob. Concurrent batching, a held-invoice review queue, and a summary in the brief's terms |
 
-**Not yet implemented**
+**Deliberately not built**
 
-The CLI, batch concurrency, and the run-record/reporting layer.
+A web dashboard — named as the cut line from the start and cut. Partial approval: INV-1016 has two valid lines and one unknown item, and the whole invoice is rejected with reasoning rather than paying a subset.
 
 ---
 

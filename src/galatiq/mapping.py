@@ -42,7 +42,7 @@ _DIRECT_FIELDS = (
 # does, so both readings travel the same path and the same parser turns both into
 # numbers. A CSV stating "Tax (6%)" and a model transcribing "6%" produce the same
 # result, which is what makes comparing the two readings meaningful.
-_AMOUNT_FIELDS = ("subtotal", "tax_rate", "tax_amount", "total")
+_AMOUNT_FIELDS = ("subtotal", "tax_rate", "tax_amount", "shipping", "total")
 
 # Hint keys consumed by the mapping, so they do not also land in `extra`.
 _CONSUMED = (

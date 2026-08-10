@@ -142,12 +142,39 @@ class TestUnparsedAmountFindings:
         assert findings[0].code == FindingCode.DATA_INTEGRITY
         assert "$3,500.O0" in findings[0].evidence
 
-    def test_severity_is_critical(self):
-        """An invoice whose total cannot be read is not one to pay. The alternative —
-        letting a retry quietly rewrite it as 3500.00 — produces a payment nobody can
-        trace back to what the document said."""
+    def test_an_unreadable_total_is_critical(self):
+        """You cannot pay an amount you cannot read."""
         invoice = parse_amounts(Invoice(total_raw="$3,500.O0"))
         assert unparsed_amount_findings(invoice)[0].severity == Severity.CRITICAL
+
+    def test_an_unreadable_line_amount_is_only_a_warning(self):
+        """INV-1012's actual shape: the total reads perfectly at $9,975.00, and it is
+        line 2's extended amount that carries the letter O.
+
+        Rejecting the whole invoice because one line's arithmetic is mistyped — when the
+        quantity, the unit price and the total are all legible — is out of proportion to
+        the problem. Worth a glance, not a refusal.
+        """
+        invoice = parse_amounts(
+            Invoice(
+                total_raw="$9,975.00",
+                line_items=[
+                    LineItem(raw_name="WidgetA", quantity=14, unit_price_raw="250.00",
+                             stated_amount_raw="$3,500.O0")
+                ],
+            )
+        )
+        findings = unparsed_amount_findings(invoice)
+
+        assert len(findings) == 1
+        assert findings[0].severity == Severity.WARN
+        assert invoice.total == Decimal("9975.00")
+
+    def test_an_unreadable_subtotal_is_only_a_warning(self):
+        """It silences the arithmetic check — a loss of verification, not evidence of a
+        problem, when the total itself is legible."""
+        invoice = parse_amounts(Invoice(subtotal_raw="$2,50O.00", total_raw="2500.00"))
+        assert unparsed_amount_findings(invoice)[0].severity == Severity.WARN
 
     def test_line_level_damage_names_the_line(self):
         invoice = parse_amounts(
@@ -180,3 +207,54 @@ class TestUnparsedAmountFindings:
     def test_absent_amounts_produce_nothing(self):
         """INV-1003 states no subtotal at all. Absent is not the same as unreadable."""
         assert unparsed_amount_findings(Invoice(invoice_number="INV-1003")) == []
+
+
+class TestParseQuantities:
+    """The raw/parsed split that was missing.
+
+    A model told repeatedly to put values in `*_raw` fields will sometimes generalise and
+    do it for quantity too. Without this the quantity is lost, and a documented-clean
+    invoice gets rejected for a missing quantity that the document stated plainly.
+
+    Found by running the corpus, not by writing a test.
+    """
+
+    def test_a_raw_quantity_is_parsed(self):
+        from galatiq.amounts import parse_quantities
+
+        invoice = parse_quantities(
+            Invoice(line_items=[LineItem(raw_name="WidgetA", quantity_raw="5")])
+        )
+
+        assert invoice.line_items[0].quantity == 5
+
+    def test_an_unparseable_quantity_stays_unparsed(self):
+        """"a dozen" should reach a DATA_INTEGRITY finding that quotes it, not be
+        guessed at."""
+        from galatiq.amounts import parse_quantities
+
+        invoice = parse_quantities(
+            Invoice(line_items=[LineItem(raw_name="WidgetA", quantity_raw="a dozen")])
+        )
+
+        assert invoice.line_items[0].quantity is None
+        assert invoice.line_items[0].quantity_raw == "a dozen"
+
+    def test_an_existing_quantity_is_left_alone(self):
+        from galatiq.amounts import parse_quantities
+
+        invoice = parse_quantities(
+            Invoice(line_items=[LineItem(raw_name="WidgetA", quantity=3, quantity_raw="99")])
+        )
+
+        assert invoice.line_items[0].quantity == 3
+
+    def test_negative_quantities_survive(self):
+        """INV-1009's -5."""
+        from galatiq.amounts import parse_quantities
+
+        invoice = parse_quantities(
+            Invoice(line_items=[LineItem(raw_name="WidgetA", quantity_raw="-5")])
+        )
+
+        assert invoice.line_items[0].quantity == -5

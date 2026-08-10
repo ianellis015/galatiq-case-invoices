@@ -2,6 +2,8 @@
 __pycache__/
 .venv/
 *.db
+*.db-wal
+*.db-shm
 .DS_Store
 
 # Runtime state: seeded database, and later the LangGraph audit store.

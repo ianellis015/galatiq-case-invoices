@@ -5,6 +5,7 @@ endpoint, which keeps the suite free, deterministic, and runnable with no key --
 means what gets tested is our logic rather than xAI's uptime.
 """
 
+import itertools
 from types import SimpleNamespace
 
 import pytest
@@ -48,9 +49,10 @@ class FakeLLM:
     provider = "fake"
     model = "fake-model-1"
 
-    def __init__(self, *responses):
+    def __init__(self, *responses, defaults=None):
         self.queue = list(responses)
         self.calls = []
+        self.defaults = {**_DEFAULTS, **(defaults or {})}
 
     def complete(self, messages, response_model, *, temperature=None, exclude=None):
         self.calls.append(
@@ -78,7 +80,7 @@ class FakeLLM:
             # extraction does not have to script four calls to say something about two.
             # Everything else still raises: an unscripted extraction call is a real
             # behaviour change, and handing back something plausible would hide it.
-            default = _DEFAULTS.get(response_model.__name__)
+            default = self.defaults.get(response_model.__name__)
             if default is None:
                 raise AssertionError(
                     f"FakeLLM: unscripted call #{len(self.calls)} for "
@@ -114,6 +116,51 @@ class FakeLLM:
     def count_for(self, *model_names: str) -> int:
         wanted = set(model_names)
         return sum(1 for c in self.calls if c.response_model.__name__ in wanted)
+
+
+class AutoLLM(FakeLLM):
+    """A FakeLLM that answers every agent, including the extractor.
+
+    For tests about the *runner* — batching, concurrency, the review queue — where the
+    point is what happens to twenty documents rather than what any one model call
+    returned. Scripting four responses per document across a batch would bury the thing
+    being tested in setup.
+
+    `FakeLLM` stays strict for the extraction tests, where an unscripted call is a real
+    behaviour change worth failing on.
+    """
+
+    def __init__(self, *responses, invoice: Invoice | None = None, **kwargs):
+        counter = itertools.count(1)
+
+        def next_invoice() -> Invoice:
+            # A distinct number per document unless one was supplied. Reusing a number
+            # across a batch makes every document after the first a duplicate of the
+            # first, which is correct behaviour and a useless test.
+            if invoice is not None:
+                return invoice
+            return Invoice(
+                invoice_number=f"INV-AUTO-{next(counter)}",
+                vendor="Widgets Inc.",
+                total="2500.00",
+                currency="USD",
+                due_date_raw="2026-03-01",
+                line_items=[
+                    LineItem(raw_name="WidgetA", quantity=10, unit_price="250.00")
+                ],
+            )
+
+        super().__init__(
+            *responses,
+            defaults={
+                "Invoice": next_invoice,
+                "Critique": lambda: Critique(
+                    verdict="PARSE_SOUND", reasoning="Scripted default."
+                ),
+                **kwargs.pop("defaults", {}),
+            },
+            **kwargs,
+        )
 
 
 @pytest.fixture

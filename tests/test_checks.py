@@ -521,3 +521,59 @@ class TestContextSnapshot:
         restored = CheckContext.from_snapshot(context.to_snapshot())
 
         assert restored == context
+
+
+class TestShipping:
+    """INV-1010 states "Shipping: $150.00" beneath its tax line.
+
+    6,700 + 335 tax + 150 shipping = 7,185, exactly as stated. Without a term for
+    shipping the check reports a $150 discrepancy on an invoice that adds up perfectly
+    — arithmetically correct and completely wrong.
+
+    Found by running the corpus, not by writing a test.
+    """
+
+    def test_shipping_counts_toward_the_total(self, context):
+        invoice = Invoice(
+            line_items=[
+                line("WidgetA", 8), line("WidgetB", 4, "500.00"),
+                line("GadgetX", 2, "750.00"), line("WidgetA", 4, "300.00"),
+            ],
+            subtotal="6700.00",
+            tax_amount="335.00",
+            shipping="150.00",
+            total="7185.00",
+        )
+
+        assert check_arithmetic(invoice, context) == []
+
+    def test_shipping_does_not_count_toward_the_subtotal(self, context):
+        """A shipping line is not a product, and treating it as one would send it to
+        the stock check for an item inventory does not have."""
+        invoice = Invoice(
+            line_items=[line("WidgetA", 10)],
+            subtotal="2500.00",
+            shipping="150.00",
+            total="2650.00",
+        )
+
+        assert check_arithmetic(invoice, context) == []
+
+    def test_a_genuine_gap_is_still_reported(self, context):
+        invoice = Invoice(
+            line_items=[line("WidgetA", 10)],
+            subtotal="2500.00",
+            shipping="150.00",
+            total="9999.00",
+        )
+        findings = check_arithmetic(invoice, context)
+
+        assert codes(findings) == [FindingCode.MATH_MISMATCH]
+        assert "shipping" in findings[0].message
+
+    def test_no_shipping_line_behaves_as_before(self, context):
+        invoice = Invoice(
+            line_items=[line("WidgetA", 10)], subtotal="2500.00", total="2500.00"
+        )
+
+        assert check_arithmetic(invoice, context) == []
