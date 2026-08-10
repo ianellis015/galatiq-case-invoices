@@ -39,7 +39,7 @@ from typing import Annotated, Any
 
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, WithJsonSchema
 
-from galatiq.money import parse_money
+from galatiq.money import parse_money, try_parse_rate
 
 
 # ---------------------------------------------------------------------------
@@ -66,6 +66,42 @@ def _to_money(value: Any) -> Decimal:
         return parse_money(value)
     except (TypeError, ValueError) as exc:
         raise ValueError(str(exc)) from exc
+
+
+def _to_money_lenient(value: Any) -> Decimal | None:
+    """Coerce to Decimal, or None when the text is not an amount.
+
+    Used for the *parsed* money fields on an invoice, where unparseable text is an
+    ordinary property of a real document rather than a failure. INV-1012 states
+    "$3,500.O0"; that belongs in the `_raw` companion field with a finding attached,
+    not in an exception that stops the pipeline.
+
+    Floats still raise. That guard protects our arithmetic, not the document's, and a
+    messy invoice is no reason to accept binary rounding into a payment.
+    """
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return None
+    if isinstance(value, bool) or isinstance(value, float):
+        raise ValueError(
+            f"refusing to build money from {type(value).__name__} ({value!r})"
+        )
+
+    try:
+        return parse_money(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _to_rate_lenient(value: Any) -> Decimal | None:
+    """As above, for a tax rate -- which may be written "6%" or "0.06"."""
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return None
+    if isinstance(value, bool) or isinstance(value, float):
+        raise ValueError(
+            f"refusing to build a rate from {type(value).__name__} ({value!r})"
+        )
+
+    return try_parse_rate(value)
 
 
 def _to_money_or_none(value: Any) -> Decimal | None:
@@ -106,6 +142,23 @@ OptionalMoney = Annotated[
 OptionalRate = Annotated[
     Decimal | None,
     BeforeValidator(_to_money_or_none),
+    WithJsonSchema({"type": ["string", "null"]}),
+]
+
+# The parsed money fields on an invoice. Lenient, because what a document contains is
+# not "money" -- it is text that may or may not denote money. The `_raw` companions
+# hold what was written; these hold what it turned out to mean, or nothing.
+#
+# This mirrors the dates exactly: `due_date_raw` keeps "yesterday", `due_date` is null,
+# and the difference between them is what a finding reports.
+ParsedMoney = Annotated[
+    Decimal | None,
+    BeforeValidator(_to_money_lenient),
+    WithJsonSchema({"type": ["string", "null"]}),
+]
+ParsedRate = Annotated[
+    Decimal | None,
+    BeforeValidator(_to_rate_lenient),
     WithJsonSchema({"type": ["string", "null"]}),
 ]
 
@@ -226,14 +279,17 @@ class LineItem(BaseModel):
     quantity: int | None = None
     quantity_raw: str | None = None
 
-    # Nullable because a line stating only an extended amount has no unit price to
-    # give. check_math reconciles whichever of the three numbers are present.
-    unit_price: OptionalMoney = None
+    # Amounts as the document wrote them, and as they parse. The model fills the raw
+    # fields; a deterministic step fills the parsed ones. An amount that does not parse
+    # leaves the parsed field null and the raw text intact, which is what lets a
+    # finding quote "$3,500.O0" instead of reporting a missing price.
+    unit_price_raw: str | None = None
+    unit_price: ParsedMoney = None
 
     # Some documents state a per-line amount as well as a unit price (INV-1013 does).
-    # I keep it as stated rather than recomputing, so check_math has both numbers to
-    # compare.
-    stated_amount: OptionalMoney = None
+    # Kept as stated rather than recomputed, so check_math has both numbers to compare.
+    stated_amount_raw: str | None = None
+    stated_amount: ParsedMoney = None
 
     # INV-1013 annotates lines with "Volume discount", "Expedited", "Sample".
     note: str | None = None
@@ -290,10 +346,19 @@ class Invoice(BaseModel):
 
     # --- money ---
     # All optional: INV-1003 states only a total, with no subtotal or tax lines.
-    subtotal: OptionalMoney = None
-    tax_rate: OptionalRate = None
-    tax_amount: OptionalMoney = None
-    total: OptionalMoney = None
+    #
+    # Raw and parsed, for the same reason the dates are. A document contains text, and
+    # whether that text denotes an amount is a question with three answers: yes, no,
+    # and "it did not say". Collapsing the middle one into null would mean reporting a
+    # missing total on INV-1012, which states one perfectly clearly as "$3,500.O0".
+    subtotal_raw: str | None = None
+    subtotal: ParsedMoney = None
+    tax_rate_raw: str | None = None
+    tax_rate: ParsedRate = None
+    tax_amount_raw: str | None = None
+    tax_amount: ParsedMoney = None
+    total_raw: str | None = None
+    total: ParsedMoney = None
 
     # No default currency. Assuming USD when a document is silent is a judgement
     # about the world, and judgements belong in the checks where they can be
