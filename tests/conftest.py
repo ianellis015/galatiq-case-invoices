@@ -163,6 +163,22 @@ class AutoLLM(FakeLLM):
         )
 
 
+@pytest.fixture(autouse=True)
+def _log_to_a_temp_file(tmp_path, monkeypatch):
+    """Keep the suite out of the real `var/galatiq.log`.
+
+    Anything that invokes the CLI configures logging, and without this the tests would
+    append to the developer's own operational log — the same reason every other test
+    here runs against a temporary database.
+    """
+    from galatiq import logs
+
+    logs.reset()
+    monkeypatch.setattr("galatiq.logs.LOG_PATH", tmp_path / "galatiq.log")
+    yield
+    logs.reset()
+
+
 @pytest.fixture
 def sample_invoice():
     """A clean, complete extraction — INV-1001's shape."""

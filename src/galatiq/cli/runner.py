@@ -32,9 +32,12 @@ from langgraph.types import Command
 
 from galatiq.config import AUDIT_DB_PATH, ensure_var_dir
 from galatiq.graph import build_graph, thread_for
+from galatiq.logs import logger
 from galatiq.models import Invoice, Outcome, RunRecord
 from galatiq.policy import usd_total_of
 from galatiq.state import initial_state
+
+log = logger(__name__)
 
 
 @dataclass
@@ -167,7 +170,10 @@ def process_document(source_path: str | Path, options: RunOptions) -> RunRecord:
     why" is information; a traceback that ends the run is not.
     """
     source_path = str(source_path)
+    name = Path(source_path).name
     started = time.monotonic()
+
+    log.info("start   %s", name)
 
     try:
         with _graph(options) as graph:
@@ -178,13 +184,28 @@ def process_document(source_path: str | Path, options: RunOptions) -> RunRecord:
             else:
                 state = _run_watched(graph, source_path, options.on_event)
     except Exception as exc:  # noqa: BLE001 - one document must not fail the batch
+        elapsed = int((time.monotonic() - started) * 1000)
+        # The record carries one sentence, which is right for a report and useless for
+        # a diagnosis. `exception()` puts the traceback in the log file, so a document
+        # that failed can be understood rather than only counted.
+        log.exception("failed  %s after %dms", name, elapsed)
         return RunRecord(
             source_path=source_path,
             error=f"{type(exc).__name__}: {exc}",
-            latency_ms=int((time.monotonic() - started) * 1000),
+            latency_ms=elapsed,
         )
 
-    return _record(source_path, state, options, int((time.monotonic() - started) * 1000))
+    elapsed = int((time.monotonic() - started) * 1000)
+    record = _record(source_path, state, options, elapsed)
+
+    log.info(
+        "done    %s  %s  %s  %dms",
+        name,
+        record.invoice_number or "no invoice number",
+        "AWAITING_REVIEW" if record.awaiting_review else (record.outcome or "no outcome"),
+        elapsed,
+    )
+    return record
 
 
 def process_batch(paths: list[Path], options: RunOptions) -> BatchResult:
@@ -194,8 +215,18 @@ def process_batch(paths: list[Path], options: RunOptions) -> BatchResult:
     it, and a report that lists invoices in racing order is a report whose diff between
     two runs is meaningless.
     """
+    started = time.monotonic()
+    log.info(
+        "batch start  %d document(s)  concurrency=%d  as_of=%s",
+        len(paths),
+        min(options.concurrency, len(paths)),
+        options.as_of,
+    )
+
     if len(paths) == 1 or options.concurrency <= 1:
-        return BatchResult(records=[process_document(p, options) for p in paths])
+        result = BatchResult(records=[process_document(p, options) for p in paths])
+        _log_batch_end(result, time.monotonic() - started)
+        return result
 
     # Before the pool, not inside it. See prepare_checkpointer.
     prepare_checkpointer(options)
@@ -210,7 +241,27 @@ def process_batch(paths: list[Path], options: RunOptions) -> BatchResult:
             record = future.result()
             records[record.source_path] = record
 
-    return BatchResult(records=[records[str(p)] for p in paths])
+    result = BatchResult(records=[records[str(p)] for p in paths])
+    _log_batch_end(result, time.monotonic() - started)
+    return result
+
+
+def _log_batch_end(result: BatchResult, elapsed: float) -> None:
+    """One line summarising the run, so the log has an anchor to read backwards from."""
+    counts: dict[str, int] = {}
+    for record in result.records:
+        key = "AWAITING_REVIEW" if record.awaiting_review else str(record.outcome)
+        counts[key] = counts.get(key, 0) + 1
+
+    failed = sum(1 for r in result.records if r.error)
+
+    log.info(
+        "batch end    %d document(s) in %.1fs  %s%s",
+        len(result.records),
+        elapsed,
+        "  ".join(f"{k}={v}" for k, v in sorted(counts.items())) or "nothing processed",
+        f"  failed={failed}" if failed else "",
+    )
 
 
 def resume_document(

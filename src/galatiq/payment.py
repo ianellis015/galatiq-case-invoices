@@ -27,7 +27,10 @@ from decimal import Decimal
 from typing import Any
 
 from galatiq.models import ApprovalDecision, Invoice, Outcome, PaymentResult, PaymentStatus
+from galatiq.logs import logger
 from galatiq.store.repository import record_payment
+
+log = logger(__name__)
 
 
 def mock_payment(vendor: str, amount: Decimal) -> dict[str, Any]:
@@ -95,6 +98,10 @@ def execute_payment(
     )
 
     if not written:
+        log.info(
+            "payment skipped  %s  already in the ledger, no second payment made",
+            invoice.invoice_number,
+        )
         return PaymentResult(
             invoice_number=invoice.invoice_number,
             status=PaymentStatus.ALREADY_PAID,
@@ -105,6 +112,19 @@ def execute_payment(
             model=model,
             message="Already in the ledger; no payment made.",
         )
+
+    # INFO, and unconditional. Money leaving is the one event that should be in the log
+    # whether or not anyone asked for logging -- the ledger records that it happened, and
+    # this records when, in sequence with everything around it.
+    log.info(
+        "payment  %s  %s %s to %s  (%s/%s)",
+        invoice.invoice_number,
+        invoice.total,
+        invoice.currency or "USD",
+        vendor,
+        provider,
+        model,
+    )
 
     response = mock_payment(vendor, invoice.total)
 

@@ -26,6 +26,9 @@ from galatiq.llm.base import (
     Message,
 )
 from galatiq.llm.schema import response_format
+from galatiq.logs import logger
+
+log = logger(__name__)
 
 # Failures worth trying again: the network dropped, we were throttled, or the far end
 # had a bad moment. Everything else -- a bad key, a malformed request -- will fail the
@@ -114,14 +117,29 @@ class XAIClient:
             ) from exc
 
         usage = getattr(raw_response, "usage", None)
+        prompt_tokens = getattr(usage, "prompt_tokens", None)
+        completion_tokens = getattr(usage, "completion_tokens", None)
+
+        # DEBUG rather than INFO: one line per call is roughly a hundred lines per batch,
+        # which belongs in the file and not on somebody's screen. It is what makes "why
+        # did that batch cost 84 cents" answerable from the run rather than from a
+        # billing dashboard.
+        log.debug(
+            "%s call ok  %s  %dms  prompt=%s completion=%s",
+            self.model,
+            response_model.__name__,
+            latency_ms,
+            prompt_tokens,
+            completion_tokens,
+        )
 
         return LLMResult(
             value=value,
             provider=self.provider,
             model=self.model,
             latency_ms=latency_ms,
-            prompt_tokens=getattr(usage, "prompt_tokens", None),
-            completion_tokens=getattr(usage, "completion_tokens", None),
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
         )
 
     def _call_with_retry(self, **kwargs: Any) -> Any:
@@ -140,7 +158,20 @@ class XAIClient:
             except _RETRYABLE as exc:
                 last = exc
                 if attempt < self._max_retries - 1:
-                    time.sleep(2**attempt)
+                    delay = 2**attempt
+                    # WARNING, so it reaches the screen without --verbose. A run that
+                    # silently retried thirty times looks identical to one that sailed
+                    # through: same records, same outcomes, four minutes longer and no
+                    # way to tell why.
+                    log.warning(
+                        "%s unreachable (%s), retrying in %ds [attempt %d/%d]",
+                        self.model,
+                        type(exc).__name__,
+                        delay,
+                        attempt + 1,
+                        self._max_retries,
+                    )
+                    time.sleep(delay)
             except openai.APIStatusError as exc:
                 # 4xx that is not a rate limit: a bad key, a rejected schema, a
                 # malformed request. Retrying cannot help.

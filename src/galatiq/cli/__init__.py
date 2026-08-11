@@ -17,6 +17,7 @@ from typing import Optional
 
 import typer
 
+from galatiq import logs
 from galatiq.cli import render
 from galatiq.cli.review import review_queue
 from galatiq.cli.runner import RunOptions, process_batch
@@ -58,9 +59,20 @@ def run(
     as_json: bool = typer.Option(
         False, "--json", help="Emit run records as JSON instead of a report."
     ),
+    verbose: bool = typer.Option(
+        False,
+        "--verbose",
+        "-v",
+        help="Show each agent and check as it runs, and log at INFO to the screen.",
+    ),
 ) -> None:
     """Process one invoice, or a directory of them."""
     reference = date.fromisoformat(as_of) if as_of else date.today()
+
+    # Before anything else, so a failure to find a key or a document is itself logged.
+    # The file is written either way; --verbose only decides what also reaches the
+    # screen.
+    log_path = logs.configure(verbose=verbose)
 
     try:
         client = get_client()
@@ -83,10 +95,16 @@ def run(
         as_of=reference,
         interactive=interactive,
         concurrency=concurrency,
+        # The same event stream the dashboard consumes. Off unless asked for: printing
+        # twenty documents' worth of steps above the report would bury it.
+        on_event=render.live_events() if (verbose and not as_json) else None,
     )
 
     if not as_json:
         render.banner(client.provider, client.model, reference)
+        if log_path:
+            # no_wrap: a long path folded across three lines looks like a crash report.
+            render.console.print(f"[dim]Logging to {log_path}[/dim]", no_wrap=True)
         render.console.print()
 
     started = time.monotonic()

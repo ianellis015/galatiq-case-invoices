@@ -25,6 +25,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
+from galatiq import logs
 from galatiq.api.batches import manager
 from galatiq.cli.runner import RunOptions, resume_document
 from galatiq.config import AUDIT_DB_PATH, DEFAULT_CONCURRENCY, INVOICE_DIR
@@ -51,6 +52,8 @@ from galatiq.store.repository import (
     update_run,
 )
 from galatiq.store.seed import seed_inventory
+
+log = logs.logger(__name__)
 
 def _clear_state() -> None:
     """Put the system back to the position it seeds from.
@@ -89,7 +92,12 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     I run this without `--reload` when demonstrating it. Reload restarts the process on
     every file save, and every restart lands here and wipes the board.
     """
+    # Verbose, because the terminal running the server is where somebody watches a batch
+    # happen. The CLI has a report to protect; this has nothing to bury.
+    path = logs.configure(verbose=True)
+
     _clear_state()
+    log.info("ready  invoices=%s  log=%s", INVOICE_DIR, path)
     yield
 
 

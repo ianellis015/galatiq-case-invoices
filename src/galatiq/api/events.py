@@ -2,72 +2,25 @@
 
 The pipeline already emits everything needed -- `graph.stream(stream_mode="debug")`
 yields a `task` when a node starts and a `task_result` when it finishes. This module
-translates those into something with names a person can read, and spots the two moments
-worth calling out.
+translates those into events with names a person can read, and spots the moment worth
+calling out.
 
-**Nothing here changes how the pipeline runs.** It watches. The CLI does not import this,
-and a batch produces identical decisions whether anyone is watching or not.
+**Nothing here changes how the pipeline runs.** It watches, and a batch produces
+identical decisions whether anyone is watching or not.
 
-Two things are derived rather than reported:
+**Handoffs** are derived rather than reported. A node sequence that goes backwards --
+`extract_critic` then `extract` again -- is one agent sending work to another. The graph
+does not label it as such; it falls out of the order, and it is the most interesting
+thing that happens in a run.
 
-**Handoffs.** A node sequence that goes backwards -- `extract_critic` then `extract`
-again -- is one agent sending work to another. The graph does not label it as such; it
-falls out of the order, and it is the most interesting thing that happens.
-
-**Agent versus machinery.** Five nodes call a model and the rest are arithmetic. The
-distinction is the system's central claim, and a UI that rendered them identically would
-misrepresent it.
+The step names live in `galatiq.steps`, shared with the terminal and the log file so the
+three surfaces cannot drift into calling the same node different things.
 """
 
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import Any
 
-Kind = Literal["agent", "deterministic"]
-
-
-@dataclass(frozen=True)
-class StepInfo:
-    """How to describe one node to somebody who did not build it."""
-
-    label: str
-    kind: Kind
-
-
-# Plain descriptions. A person watching should read "Extraction critic is re-reading
-# this", not `extract_critic`.
-#
-# `kind` is the load-bearing field. The extractor, the two critics, the normalizer and
-# the approver are the only nodes that call a model; everything else is arithmetic with
-# tests. Rendering them the same way would flatten the one distinction the architecture
-# is built on.
-STEPS: dict[str, StepInfo] = {
-    "load": StepInfo("Reading the document", "deterministic"),
-    "extract": StepInfo("Extractor", "agent"),
-    "extract_critic": StepInfo("Extraction critic", "agent"),
-    "finalize": StepInfo("Collecting findings", "deterministic"),
-    "prepare_checks": StepInfo("Reading inventory", "deterministic"),
-    "normalize": StepInfo("Normalizer", "agent"),
-    "check_stock": StepInfo("Checking stock", "deterministic"),
-    "check_pricing": StepInfo("Checking prices against the catalog", "deterministic"),
-    "check_arithmetic": StepInfo("Checking arithmetic", "deterministic"),
-    "check_integrity": StepInfo("Checking required fields", "deterministic"),
-    "check_duplicates": StepInfo("Checking for duplicates", "deterministic"),
-    "check_dates": StepInfo("Checking dates", "deterministic"),
-    "check_currency": StepInfo("Checking currency", "deterministic"),
-    "check_fraud": StepInfo("Checking for fraud signals", "deterministic"),
-    "merge_findings": StepInfo("Collating findings", "deterministic"),
-    "approve": StepInfo("Approver", "agent"),
-    "approval_critic": StepInfo("Approval critic", "agent"),
-    "pay": StepInfo("Releasing payment", "deterministic"),
-    "reject": StepInfo("Recording the rejection", "deterministic"),
-    "hold": StepInfo("Holding for review", "deterministic"),
-}
-
-# The eight that run at once. The only genuinely parallel moment in the pipeline, and
-# worth showing as one rather than as eight things happening to flicker together.
-PARALLEL_CHECKS = frozenset(
-    name for name in STEPS if name.startswith("check_")
-)
+from galatiq.steps import PARALLEL_CHECKS, STEPS, Kind, StepInfo, describe
 
 # Backwards edges: an agent handing work to another with something to say. The value is
 # what to say when no specific reason can be recovered from the state.
@@ -75,11 +28,6 @@ _HANDOFFS = {
     ("extract_critic", "extract"): "sent back for a re-read",
     ("approval_critic", "approve"): "sent back for reconsideration",
 }
-
-
-def describe(step: str) -> StepInfo:
-    """A step's label and kind, with a safe fallback for a node added later."""
-    return STEPS.get(step, StepInfo(step.replace("_", " ").capitalize(), "deterministic"))
 
 
 @dataclass

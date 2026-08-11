@@ -12,13 +12,15 @@ without anything here having to care.
 """
 
 from decimal import Decimal
-from typing import Any
+from pathlib import Path
+from typing import Any, Callable
 
 from rich.console import Console, Group
 from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
+from galatiq.steps import PARALLEL_CHECKS
 from galatiq.models import (
     Finding,
     Invoice,
@@ -196,6 +198,63 @@ def batch_row(record: RunRecord) -> None:
         f"  [{style}]{str(outcome):<9}[/{style}] {name:<26} "
         f"[dim]{reason[:60]}[/dim]"
     )
+
+
+def live_events() -> Callable[[dict[str, Any]], None]:
+    """A printer for pipeline events as they happen, for `--verbose`.
+
+    The self-correction loops are the most interesting thing the system does and the
+    least visible: a critic sending work back changes an outcome, costs a model call, and
+    leaves no trace in a report that only shows where each document ended up. This prints
+    the same event stream the dashboard renders.
+
+    Agents and deterministic steps are marked differently on purpose -- `~` for a model,
+    `-` for arithmetic. Which half of the system is working is the distinction the whole
+    architecture rests on, and a reader watching it scroll past should be able to see it.
+
+    A factory rather than a plain function because it needs to remember one thing: the
+    eight checks all start at once and would otherwise print eight identical lines. The
+    fan-out is one event to a reader, so it is announced once per document.
+    """
+    announced: set[str] = set()
+
+    def printer(event: dict[str, Any]) -> None:
+        kind = event.get("type")
+        doc = event.get("doc") or ""
+        name = Path(doc).name if doc else ""
+
+        if kind == "step.start":
+            if event.get("parallel"):
+                if doc in announced:
+                    return
+                announced.add(doc)
+                console.print(
+                    f"  [dim]-[/dim] [dim]{name:<26}[/dim] "
+                    f"Running {len(PARALLEL_CHECKS)} checks at once",
+                    highlight=False,
+                )
+                return
+
+            mark = "[cyan]~[/cyan]" if event["kind"] == "agent" else "[dim]-[/dim]"
+            console.print(
+                f"  {mark} [dim]{name:<26}[/dim] {event['label']}", highlight=False
+            )
+
+        elif kind == "handoff":
+            # The moment worth watching. Yellow because it is the exception rather than
+            # the flow -- one agent telling another it got something wrong.
+            console.print(
+                f"  [yellow]<-[/yellow] [dim]{name:<26}[/dim] "
+                f"[yellow]{event['from']} -> {event['to']}[/yellow]: {event['reason']}",
+                highlight=False,
+            )
+
+        elif kind == "document.end":
+            # A re-run of the same document -- resuming a held invoice -- gets its own
+            # announcement rather than inheriting the last one.
+            announced.discard(doc)
+
+    return printer
 
 
 def _prevented(rejected: list[RunRecord]) -> Decimal:
