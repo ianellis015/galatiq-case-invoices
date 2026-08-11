@@ -29,7 +29,11 @@ is a local SQLite file created by the seed command below.
 
 ### 2. Add an API key
 
-Create a `.env` in the project root:
+Copy `.env.example` to `.env` in the project root and fill in the key:
+
+```bash
+cp .env.example .env
+```
 
 ```bash
 XAI_API_KEY=xai-...
