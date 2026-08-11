@@ -182,8 +182,8 @@ class TestBatch:
 
     def test_concurrency_does_not_change_the_answers(self, workspace, tmp_path):
         """Inventory is read-only and validation is a pure function of a snapshot, so
-        parallel and serial runs must agree. That was decided in the first ticket for
-        correctness; this is where it pays for itself."""
+        parallel and serial runs must agree. I made inventory read-only for correctness
+        rather than for speed; this is the test that holds me to it."""
         paths = self._paths()
 
         serial = process_batch(paths, options(workspace, AutoLLM(), concurrency=1))
@@ -219,6 +219,38 @@ class TestBatch:
 
         assert len(result.records) == 3
         assert all(r.error is None for r in result.records)
+
+    def test_a_cold_checkpointer_survives_a_full_pool(self, workspace, tmp_path):
+        """Every worker opens its own checkpointer connection, and an sqlite file that
+        does not exist yet is created by whichever one gets there first. Eight arriving
+        together used to leave some of them opening a half-written file: "file is not a
+        database", on a handful of documents while the rest of the batch succeeded.
+
+        The audit database is deliberately absent here, which is the state a fresh
+        checkout is in — and the state a reset leaves behind.
+        """
+        db, _ = workspace
+        audit = tmp_path / "cold-audit.db"
+        assert not audit.exists()
+
+        # Eight distinct documents, because a checkpointer thread is keyed by source
+        # path — the same file eight times would be one thread, not eight.
+        paths = sorted(INVOICES.glob("invoice_100*.*"))[:8]
+        assert len(paths) == 8
+
+        result = process_batch(
+            paths,
+            RunOptions(
+                client=AutoLLM(),
+                connect_db=lambda: connect(db),
+                audit_db=audit,
+                as_of=TODAY,
+                concurrency=8,
+            ),
+        )
+
+        assert len(result.records) == 8
+        assert [r.error for r in result.records] == [None] * 8
 
     def test_unique_invoices_differs_from_document_count(self, workspace):
         """INV-1011 arrives as a PDF and a text file. Two documents, one invoice.

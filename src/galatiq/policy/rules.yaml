@@ -92,3 +92,18 @@ rules:
     params: {}
     effect: warn
     risk: 10
+
+  - id: R8
+    description: >
+      A line billed above the catalog price. Surcharges are a real thing vendors
+      legitimately apply -- INV-1010 labels its overcharged line "rush order" -- so
+      this asks a person whether the price was agreed rather than refusing to pay it.
+      Only overcharges reach here; a line billed below catalog is recorded as INFO and
+      does not fire this rule.
+    label: Billed above the catalog price
+    predicate: any_finding_code_in
+    params:
+      codes: [PRICE_MISMATCH]
+      severity: WARN
+    effect: hold
+    risk: 60

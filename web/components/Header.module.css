@@ -1,0 +1,92 @@
+/*
+ * The company's own tool, not a vendor's product.
+ *
+ * ACME's name comes first; ours is not here at all. Software that sits inside a finance
+ * team should look like it belongs to them.
+ */
+
+.bar {
+  border-bottom: 1px solid var(--border);
+  background: var(--bg);
+  position: sticky;
+  top: 0;
+  z-index: 10;
+}
+
+.inner {
+  max-width: 1440px;
+  margin: 0 auto;
+  padding: 16px 28px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
+.mark {
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
+  background: #f5f5f5;
+  color: #0a0a0a;
+  display: grid;
+  place-items: center;
+  font-weight: 700;
+  font-size: 15px;
+  flex: none;
+}
+
+.company {
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.divider {
+  color: var(--text-faint);
+}
+
+.section {
+  font-size: 15px;
+  color: var(--text-dim);
+}
+
+.right {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.status {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 13px;
+  color: var(--text-dim);
+}
+
+.status::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--approved);
+}
+
+.statusOffline::before {
+  background: var(--denied);
+}
+
+@media (max-width: 700px) {
+  .section,
+  .divider,
+  .status {
+    display: none;
+  }
+}

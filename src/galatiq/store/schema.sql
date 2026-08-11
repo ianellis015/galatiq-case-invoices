@@ -84,3 +84,35 @@ CREATE TABLE IF NOT EXISTS ledger (
 
 -- Payment history is queried by invoice number on every run. The UNIQUE constraint
 -- already creates an index that serves those lookups, so I add no other index.
+
+
+-- ---------------------------------------------------------------------------
+-- runs -- one row per document processed, for the web interface.
+--
+-- The CLI holds these in memory for the length of a batch, which is fine for a
+-- terminal that prints and exits. A browser refresh would lose everything, so the
+-- API writes them here as each document completes.
+--
+-- Deliberately additive: nothing in the pipeline reads this table, and the CLI does
+-- not write to it. It is a record of what happened, not part of how anything is
+-- decided.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS runs (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+
+    -- Groups the documents of one batch, so a page can show the latest run.
+    batch_id       TEXT    NOT NULL,
+
+    source_path    TEXT    NOT NULL,
+    invoice_number TEXT,
+    outcome        TEXT,
+
+    -- The whole RunRecord as JSON. Findings, the decision, the extracted invoice --
+    -- shapes that already have pydantic models and would gain nothing from being
+    -- shredded into columns nobody queries.
+    record         TEXT    NOT NULL,
+
+    created_at     TEXT    NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS runs_batch ON runs (batch_id);

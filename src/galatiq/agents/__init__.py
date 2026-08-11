@@ -1,16 +1,19 @@
 """The agents: nodes that call a language model.
 
-Two so far, and they are deliberately separate agents rather than one prompted twice:
+Five of them, and I kept each one a separate agent with its own prompt rather than one
+agent prompted five ways:
 
   * **Extractor** -- a document becomes an `Invoice`. Transcription, not judgement.
   * **Extraction critic** -- did the extractor misread? Adversarial re-read.
+  * **Normalizer** -- the names a document used become the names the catalog uses.
+  * **Approver** -- findings become a decision, with reasons a human can read.
+  * **Approval critic** -- what did the approver miss? A second pair of eyes.
 
-A generator and its reviewer sharing a prompt is one agent talking to itself, and it
-inherits the mistake it is meant to catch.
+The pairing is the point. A generator and its reviewer sharing a prompt is one agent
+talking to itself, and it inherits the mistake it is meant to catch.
 
-Still to come: the normalizer (item names to catalog entries), the approver, and the
-approval critic. Payment is deliberately not an agent -- it is a tool call behind a
-deterministic edge, and no model is given discretion over releasing funds.
+Payment is deliberately not among them. It is a tool call behind a deterministic edge,
+and I give no model discretion over releasing funds.
 """
 
 from galatiq.agents.extract_critic import (

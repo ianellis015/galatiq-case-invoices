@@ -7,7 +7,7 @@ mistake it is supposed to catch.
 The critic's whole value is in a distinction it is easy to build without noticing:
 
     "Did I misread the document?"      <- this agent
-    "Is the document itself wrong?"    <- the validation checks, two tickets later
+    "Is the document itself wrong?"    <- the validation checks, further down
 
 A critic that conflates them cannot terminate on a bad document. INV-1009 states a
 subtotal of 1000.00 while its line items sum to -250.00. Transcribe that faithfully and

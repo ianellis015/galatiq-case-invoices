@@ -6,6 +6,7 @@ reviewable in one file, and the idempotency rule cannot be got wrong by a caller
 because callers never write to `ledger` directly.
 """
 
+import json
 import sqlite3
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -175,3 +176,86 @@ def get_payment(conn: sqlite3.Connection, invoice_number: str) -> dict | None:
     record = dict(row)
     record["amount"] = from_cents(record["amount_cents"])
     return record
+
+
+# ---------------------------------------------------------------------------
+# runs -- what happened to each document, for the web interface
+#
+# Additive. Nothing in the pipeline reads these, and the CLI does not write them; a
+# terminal that prints and exits has no use for them. They exist so a browser can be
+# refreshed without losing a batch.
+# ---------------------------------------------------------------------------
+
+
+def save_run(conn: sqlite3.Connection, batch_id: str, record) -> None:
+    """Record what happened to one document.
+
+    The whole record goes in as JSON. Findings, the decision and the extracted invoice
+    already have pydantic models, and shredding them into columns nobody queries would
+    be work with no reader.
+    """
+    conn.execute(
+        """
+        INSERT INTO runs (batch_id, source_path, invoice_number, outcome, record,
+                          created_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (
+            batch_id,
+            record.source_path,
+            record.invoice_number,
+            str(record.outcome) if record.outcome else None,
+            record.model_dump_json(),
+            datetime.now(timezone.utc).isoformat(),
+        ),
+    )
+    conn.commit()
+
+
+def latest_batch_id(conn: sqlite3.Connection) -> str | None:
+    """The most recent batch, which is what a freshly opened page wants."""
+    row = conn.execute(
+        "SELECT batch_id FROM runs ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    return row["batch_id"] if row else None
+
+
+def get_runs(conn: sqlite3.Connection, batch_id: str | None = None) -> list[dict]:
+    """Every record from a batch, oldest first.
+
+    Insertion order rather than completion order -- the runner already restores input
+    order, and a list whose sequence changes between refreshes is one nobody trusts.
+    """
+    target = batch_id or latest_batch_id(conn)
+    if target is None:
+        return []
+
+    return [
+        {"id": row["id"], **json.loads(row["record"])}
+        for row in conn.execute(
+            "SELECT id, record FROM runs WHERE batch_id = ? ORDER BY id", (target,)
+        )
+    ]
+
+
+def get_run(conn: sqlite3.Connection, run_id: int) -> dict | None:
+    row = conn.execute(
+        "SELECT id, record FROM runs WHERE id = ?", (run_id,)
+    ).fetchone()
+
+    if row is None:
+        return None
+    return {"id": row["id"], **json.loads(row["record"])}
+
+
+def update_run(conn: sqlite3.Connection, run_id: int, record) -> None:
+    """Replace a record after a human has reviewed it."""
+    conn.execute(
+        "UPDATE runs SET outcome = ?, record = ? WHERE id = ?",
+        (
+            str(record.outcome) if record.outcome else None,
+            record.model_dump_json(),
+            run_id,
+        ),
+    )
+    conn.commit()

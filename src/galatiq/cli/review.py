@@ -14,7 +14,7 @@ from rich.prompt import Prompt
 
 from galatiq.cli import render
 from galatiq.cli.runner import RunOptions, resume_document
-from galatiq.models import RunRecord
+from galatiq.models import PaymentStatus, RunRecord
 
 
 def review_queue(held: list[RunRecord], options: RunOptions) -> list[RunRecord]:
@@ -58,10 +58,33 @@ def review_queue(held: list[RunRecord], options: RunOptions) -> list[RunRecord]:
         updated = resume_document(record.source_path, verdict, options)
         resumed.append(updated)
 
-        render.console.print(
-            f"  [green]Approved and paid.[/green]"
-            if verdict == "approve"
-            else "  [red]Denied. Rejection recorded.[/red]"
-        )
+        render.console.print(_confirmation(verdict, updated))
 
     return resumed
+
+
+def _confirmation(verdict: str, record) -> str:
+    """What actually happened, which is not always what was asked for.
+
+    Approving the second of two documents describing the same invoice releases no money
+    -- the first one already did, and the ledger's UNIQUE constraint stops the rest.
+    Both copies of INV-1012 sit in this queue, so approving both used to print "Approved
+    and paid" twice for a single payment. The report has to say what the ledger did.
+    """
+    if verdict != "approve":
+        return "  [red]Denied. Rejection recorded.[/red]"
+
+    if record.payment_status is PaymentStatus.ALREADY_PAID:
+        return (
+            "  [yellow]Approved — already paid, so no second payment was made.[/yellow]"
+        )
+
+    if record.payment_status is PaymentStatus.PAID:
+        return "  [green]Approved and paid.[/green]"
+
+    # Approved, but the payment did not go through. Rare, and never something to report
+    # as a success.
+    return (
+        f"  [yellow]Approved, but no payment was recorded "
+        f"({record.payment_status or 'unknown'}).[/yellow]"
+    )

@@ -82,8 +82,9 @@ def decide(
 
     return ApprovalDecision(
         outcome=combine(policy.outcome, verdict.outcome),
-        rationale=_rationale(verdict, policy),
+        rationale=verdict.rationale.strip(),
         policy_refs=policy.policy_refs,
+        concerns=_concerns(verdict, policy),
         risk_score=max(policy.risk, verdict.risk_score),
     )
 
@@ -134,24 +135,29 @@ def revise(
 
     return ApprovalDecision(
         outcome=combine(policy.outcome, verdict.outcome),
-        rationale=_rationale(verdict, policy),
+        rationale=verdict.rationale.strip(),
         policy_refs=policy.policy_refs,
+        concerns=_concerns(verdict, policy),
         risk_score=max(policy.risk, verdict.risk_score),
     )
 
 
-def _rationale(verdict: ApproverVerdict, policy: PolicyOutcome) -> str:
-    """The model's reasoning, with the blocking rule labels in front of it.
+def _concerns(verdict: ApproverVerdict, policy: PolicyOutcome) -> list[str]:
+    """The short reasons this invoice is where it is: rule labels, then the model's.
 
-    Labels first because a reviewer opening a held invoice needs to know why it is in
-    their queue before they need the narrative.
+    Rules first because they are the ones that *bound* the outcome -- the model's
+    concerns are discretionary and the rules' are not. Deduplicated, because the model
+    routinely restates a rule label in its own words and the same reason listed twice
+    reads like two problems.
     """
-    parts = list(policy.blocking_labels)
-    if verdict.concerns:
-        parts.extend(verdict.concerns)
+    seen: dict[str, str] = {}
 
-    header = "".join(f"[{part}] " for part in parts)
-    return f"{header}{verdict.rationale}".strip()
+    for part in [*policy.blocking_labels, *verdict.concerns]:
+        text = part.strip()
+        if text:
+            seen.setdefault(text.casefold(), text)
+
+    return list(seen.values())
 
 
 def _policy_sentence(policy: PolicyOutcome) -> str:

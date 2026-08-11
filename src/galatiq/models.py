@@ -434,6 +434,12 @@ class ApprovalDecision(BaseModel):
     rationale: str
     policy_refs: list[str] = Field(default_factory=list)
 
+    # The short reasons this invoice is in front of you, separate from the narrative
+    # that explains them. Kept as a list rather than glued onto the front of
+    # `rationale`, because a reader scanning a queue wants the labels and a reader
+    # opening one invoice wants the prose, and a single string cannot serve both.
+    concerns: list[str] = Field(default_factory=list)
+
     # Bounded because a score outside 0-100 is a malformed response, not a strong
     # opinion. This is a shape constraint, not a judgement about the invoice.
     risk_score: int = Field(default=0, ge=0, le=100)
@@ -463,10 +469,16 @@ class RunRecord(BaseModel):
     outcome: Outcome | None = None
     rationale: str = ""
     policy_refs: list[str] = Field(default_factory=list)
+    concerns: list[str] = Field(default_factory=list)
     risk_score: int = 0
 
     findings: list[Finding] = Field(default_factory=list)
     payment_status: PaymentStatus | None = None
+
+    # What was actually read. Carried so an interface can show the line items and
+    # dates behind a decision -- a rejection for a stock breach means little without
+    # the quantities that caused it.
+    invoice: Invoice | None = None
 
     # True when the run is suspended at a human-review pause and can be resumed. The
     # distinction matters for the summary: a held invoice is pending, not prevented.

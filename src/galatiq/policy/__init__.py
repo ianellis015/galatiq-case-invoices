@@ -85,12 +85,26 @@ class PolicyOutcome:
 
     @property
     def blocking_labels(self) -> list[str]:
-        """Only the reasons that changed the outcome.
+        """Only the reasons that changed the outcome, strongest first.
 
         A held invoice should lead with why it is held, not with every note that
-        happened to apply.
+        happened to apply -- and a *rejected* one should lead with why it was rejected.
+        Sorted by effect rather than left in rule order, because rule order is an
+        arbitrary fact about the yaml file: R1 is written before R2, so a $15,000
+        invoice with a stock breach used to announce itself as "Over $10,000 — VP
+        approval required" when the thing that actually stopped it was the stock.
+
+        The sort is stable, so rules of equal weight keep their file order.
         """
-        return [rule.label for rule in self.fired if rule.effect in ("reject", "hold")]
+        weight = {"reject": 0, "hold": 1}
+
+        return [
+            rule.label
+            for rule in sorted(
+                (r for r in self.fired if r.effect in weight),
+                key=lambda r: weight[r.effect],
+            )
+        ]
 
 
 @lru_cache(maxsize=1)

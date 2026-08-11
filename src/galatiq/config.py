@@ -33,6 +33,10 @@ DB_PATH = Path(os.environ.get("INVOICE_DB_PATH", VAR_DIR / "invoices.db"))
 # idempotency record -- two different lifetimes, two different files.
 AUDIT_DB_PATH = Path(os.environ.get("AUDIT_DB_PATH", VAR_DIR / "audit.db"))
 
+# Where documents are looked for when nothing else is specified. The API discovers
+# whatever is here rather than knowing anything about a particular set of files.
+INVOICE_DIR = Path(os.environ.get("INVOICE_DIR", PROJECT_ROOT / "data" / "invoices"))
+
 
 # --- self-correction budgets -------------------------------------------------
 #

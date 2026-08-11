@@ -56,9 +56,20 @@ def any_finding_code_in(data: PolicyInput, params: dict[str, Any]) -> bool:
     Used where the *reason* changes the response rather than the severity: a fraud signal
     and a stock shortfall are both worth a human's time, and they are worth it for
     entirely different reasons.
+
+    The optional `severity` parameter narrows it further, for codes that report both a
+    problem and a non-problem. A price mismatch is either an overcharge (WARN, somebody
+    should look) or an undercharge (INFO, worth recording and nothing more), and a rule
+    that could not tell them apart would hold every invoice a vendor discounted.
     """
     codes = set(params["codes"])
-    return any(f.code in codes for f in data.findings)
+    wanted = params.get("severity")
+
+    if wanted is None:
+        return any(f.code in codes for f in data.findings)
+
+    severity = Severity(wanted)
+    return any(f.code in codes and f.severity == severity for f in data.findings)
 
 
 def total_usd_at_least(data: PolicyInput, params: dict[str, Any]) -> bool:

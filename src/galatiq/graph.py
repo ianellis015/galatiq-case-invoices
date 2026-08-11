@@ -1,18 +1,29 @@
 """The pipeline as a state graph.
 
-    START -> load -> extract <-> extract_critic -> finalize -> END
-                       (<=2)         (<=2)
+    START -> load -> extract <-> extract_critic -> finalize -> prepare_checks
+                                                                    |
+                                                                normalize
+                                                                    |
+                                             [ eight checks, all at once ]
+                                                                    |
+                                                             merge_findings
+                                                                    |
+                                                    approve <-> approval_critic
+                                                                    |
+                                                        pay | reject | hold
 
-A chain of four function calls would handle the happy path. The graph earns its place
-on three counts, and the first one is already here:
+A chain of function calls would handle the happy path. I used a graph for three things
+a chain cannot do:
 
-  * **Cycles.** `extract <-> extract_critic` loops backwards. A chain cannot.
-  * **Checkpointing.** State is snapshotted after every node, which is the audit trail
-    and the resume mechanism, for the cost of one argument.
-  * **Interrupts.** A durable pause for human review, when approval exists.
+  * **Cycles.** `extract <-> extract_critic` and `approve <-> approval_critic` both loop
+    backwards. That is the self-correction, and a chain has no way to express it.
+  * **Checkpointing.** State is snapshotted after every node, which gives me the audit
+    trail and the resume mechanism for the cost of one argument.
+  * **Interrupts.** `hold` durably suspends a run for a human and resumes it later,
+    which is the honest implementation of "obtain VP approval".
 
-Later tickets add `normalize`, the six checks, `approve <-> approval_critic`, `route`,
-`pay` and `reject`. END moves right; nothing here gets rebuilt.
+The fan-out is written as a loop over the check registry rather than as eight hand-wired
+pairs of edges, so adding a check means adding it to the registry and nothing else.
 
 Budgets live in the routing functions below, not in prompts. They are plain functions of
 a dict -- testable with no graph and no model, and nothing inside a document can argue
@@ -228,7 +239,7 @@ def finalize_node(state: InvoiceState) -> dict[str, Any]:
 def make_prepare_checks_node(connect_db: Callable[[], Any], as_of: date | None):
     """Snapshot everything the checks are allowed to know, once.
 
-    Before the fan-out rather than inside it: seven concurrent database reads become
+    Before the fan-out rather than inside it: eight concurrent database reads become
     one, the checks become pure functions of explicit data, and the snapshot lands in
     the checkpointed state so the audit trail records the stock position that produced
     the decision rather than whatever stock says when someone reads it later.
@@ -271,7 +282,7 @@ def make_normalize_node(client: LLMClient | None):
 def make_check_node(name: str, check: Check):
     """Wrap one check as a graph node.
 
-    Each returns only `findings`, which is the key with a reducer -- so seven of these
+    Each returns only `findings`, which is the key with a reducer -- so eight of these
     running concurrently concatenate rather than collide. Without that annotation on the
     state, parallel writes to one key raise InvalidUpdateError, and this fan-out would
     not be legal.
@@ -638,7 +649,7 @@ def build_graph(
     builder.add_edge("finalize", "prepare_checks")
     builder.add_edge("prepare_checks", "normalize")
 
-    # The fan-out. Seven edges out of normalize and seven back into merge_findings,
+    # The fan-out. Eight edges out of normalize and eight back into merge_findings,
     # written as a loop because the checks are interchangeable by construction -- same
     # signature in, same type out. Adding an eighth check means adding it to the
     # registry and nothing else.
