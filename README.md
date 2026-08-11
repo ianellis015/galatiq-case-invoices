@@ -382,7 +382,7 @@ and a decision into prose. This gives up some apparent sophistication and buys t
 to say exactly why any given invoice went the way it did.
 
 **The model gets no tools, on purpose.**
-Function calling is a listed requirement, and I chose against it. Stock levels and catalog
+Function calling is a listed requirement, but I chose against it. Stock levels and catalog
 prices are fetched by deterministic code *before* the model is involved and handed to it
 whether it asked or not. The reason is that a tool is optional by construction: a model
 holding a `check_stock` tool can decide not to call it, or be persuaded by a document that
