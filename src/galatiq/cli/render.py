@@ -12,6 +12,7 @@ without anything here having to care.
 """
 
 from decimal import Decimal
+from typing import Any
 
 from rich.console import Console, Group
 from rich.panel import Panel
@@ -41,9 +42,12 @@ _SEVERITY_STYLE = {
     Severity.INFO: "dim",
 }
 
-# Five days, in seconds. The baseline the brief gives for the current manual process, and
-# the number every latency claim is measured against.
-_MANUAL_BASELINE_SECONDS = 5 * 24 * 60 * 60
+# The baseline the brief gives for the current manual process. Stated, not divided into
+# the measured time: a five-day turnaround is mostly waiting -- on an inbox, on a VP, on
+# an email chain -- and per-document processing time is not the same quantity. Reporting
+# both and letting the reader draw the comparison is a claim that survives scrutiny; a
+# five-figure multiplier is one that invites it.
+_MANUAL_BASELINE = "5 days"
 
 
 def banner(provider: str | None, model: str | None, as_of) -> None:
@@ -137,9 +141,20 @@ def decision_panel(record: RunRecord) -> None:
     if record.payment_status:
         body.add_row("Payment", str(record.payment_status))
 
+    # The short reasons first, one per line, then the narrative that explains them. A
+    # reader deciding whether to open this invoice is scanning for the former.
+    parts: list[Any] = []
+    if record.concerns:
+        parts.append(
+            Text("\n".join(f"• {concern}" for concern in record.concerns), style=style)
+        )
+        parts.append("")
+
+    parts.extend([Text(record.rationale or "No rationale recorded."), "", body])
+
     console.print(
         Panel(
-            Group(Text(record.rationale or "No rationale recorded."), "", body),
+            Group(*parts),
             title=Text(str(outcome), style=style),
             border_style=style,
             expand=False,
@@ -163,7 +178,7 @@ def batch_row(record: RunRecord) -> None:
 
     outcome = record.outcome or Outcome.HELD_FOR_REVIEW
     style = _OUTCOME_STYLE[outcome]
-    reason = record.findings[0].message if record.findings else ""
+    reason = _reason(record)
 
     # An approval that did not release money has to say so. Under concurrency two
     # documents describing the same invoice can both be approved -- they snapshot the
@@ -183,16 +198,66 @@ def batch_row(record: RunRecord) -> None:
     )
 
 
+def _prevented(rejected: list[RunRecord]) -> Decimal:
+    """Money that would have left had nothing been checking.
+
+    This is the headline business number, so it is the one worth being conservative
+    about. Two corrections against a plain sum of rejected totals:
+
+    **Once per invoice, not once per document.** INV-1013 arrives as JSON and as a PDF
+    and both are rejected, but only one payment could ever have happened -- the ledger's
+    UNIQUE constraint guarantees it. Counting both inflates this figure by $22,562.80 on
+    the provided corpus, and a number a reader can disprove by adding up the rows
+    themselves costs more credibility than it buys.
+
+    **Negative totals contribute nothing.** INV-1009 states a total of -$250. Preventing
+    it did not save minus two hundred and fifty dollars, and letting it subtract from the
+    total would be arithmetic nobody can defend.
+    """
+    seen: set[str] = set()
+    total = Decimal("0")
+
+    for record in rejected:
+        # Documents with no invoice number cannot be deduplicated against anything, so
+        # each counts once on its own.
+        key = record.invoice_number
+        if key is not None:
+            if key in seen:
+                continue
+            seen.add(key)
+
+        amount = record.usd_total or Decimal("0")
+        if amount > 0:
+            total += amount
+
+    return total
+
+
+def _reason(record: RunRecord) -> str:
+    """The one line explaining an outcome, for the batch list.
+
+    Findings first, because a concrete measurement beats a summary. But an invoice can
+    be rejected with no findings at all: INV-1004 passes every deterministic check and
+    is refused on the approver's judgement about a fictional vendor address. That row
+    used to print blank -- a rejection with no stated reason, in a tool whose whole
+    claim is that every decision is explicable.
+    """
+    if record.findings:
+        return record.findings[0].message
+    if record.concerns:
+        return record.concerns[0]
+
+    # First sentence of the reasoning, failing everything else.
+    return record.rationale.split(". ")[0]
+
+
 def summary(result, elapsed_seconds: float) -> None:
     """The business case, from measurements rather than estimates."""
     records = result.records
     by_outcome = {o: [r for r in records if r.outcome is o] for o in Outcome}
     failed = [r for r in records if r.error]
 
-    prevented = sum(
-        (r.usd_total or Decimal("0") for r in by_outcome[Outcome.REJECTED]),
-        Decimal("0"),
-    )
+    prevented = _prevented(by_outcome[Outcome.REJECTED])
 
     table = Table.grid(padding=(0, 3))
     table.add_column(style="dim", justify="right")
@@ -226,13 +291,11 @@ def summary(result, elapsed_seconds: float) -> None:
 
     if records:
         per_invoice = elapsed_seconds / len(records)
-        speedup = int(_MANUAL_BASELINE_SECONDS / per_invoice) if per_invoice else 0
         table.add_row("", "")
         table.add_row("Elapsed", f"{elapsed_seconds:.1f}s")
+        table.add_row("Per document", f"{per_invoice:.1f}s")
         table.add_row(
-            "Per document",
-            f"{per_invoice:.1f}s  [dim]vs a 5-day manual turnaround "
-            f"(~{speedup:,}x)[/dim]",
+            "Manual baseline", f"[dim]{_MANUAL_BASELINE} per invoice[/dim]"
         )
 
     console.print(Panel(table, title="Summary", border_style="dim", expand=False))

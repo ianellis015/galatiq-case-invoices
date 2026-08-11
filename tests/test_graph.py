@@ -434,7 +434,7 @@ class TestFindingsAreNotDuplicated:
 
 
 class TestValidationFanOut:
-    """The seven checks running concurrently, end to end."""
+    """The eight checks running concurrently, end to end."""
 
     def test_findings_from_multiple_checks_merge_without_conflict(self, sound):
         """Seven nodes writing the same state key at once.
@@ -613,7 +613,7 @@ class TestApprovalAndPayment:
 
         assert state["decision"].outcome == Outcome.HELD_FOR_REVIEW
         assert state["payment"].status == PaymentStatus.NOT_ATTEMPTED
-        assert "Over $10,000" in state["decision"].rationale
+        assert any("Over $10,000" in c for c in state["decision"].concerns)
 
     def test_a_broken_invoice_is_rejected_with_reasoning(self):
         invoice = Invoice(

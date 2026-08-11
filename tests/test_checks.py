@@ -1,4 +1,4 @@
-"""Tests for the seven validation checks.
+"""Tests for the eight validation checks.
 
 Every check is a pure function of an invoice and a context snapshot, so these need no
 database, no graph and no model — a context is three lines to build. That is the payoff
@@ -19,6 +19,7 @@ from galatiq.checks.dates import check_dates
 from galatiq.checks.duplicates import check_duplicates
 from galatiq.checks.fraud import check_fraud
 from galatiq.checks.integrity import check_integrity
+from galatiq.checks.pricing import check_pricing
 from galatiq.checks.stock import check_stock
 from galatiq.models import Finding, FindingCode, Invoice, LineItem, Severity
 
@@ -48,6 +49,97 @@ def line(item, quantity, price="250.00", **kwargs):
 
 def codes(findings):
     return [f.code for f in findings]
+
+
+class TestPricing:
+    """The check that closes the last way money leaves incorrectly.
+
+    An invoice can be internally perfect -- every quantity in stock, every line
+    multiplying out, subtotal and tax reconciling to the total -- and still charge a
+    price nobody agreed to.
+    """
+
+    def test_the_catalog_price_is_silent(self, context):
+        invoice = Invoice(line_items=[line("WidgetA", 4, "250.00")])
+        assert check_pricing(invoice, context) == []
+
+    def test_an_overcharge_is_reported(self, context):
+        """INV-1010's fourth line. Eight WidgetA at $250, then four more at $300 as a
+        'rush order' -- $200 that reconciles perfectly and should not be there."""
+        invoice = Invoice(
+            line_items=[
+                LineItem(
+                    raw_name="WidgetA (rush order)",
+                    item="WidgetA",
+                    quantity=4,
+                    unit_price="300.00",
+                )
+            ]
+        )
+        findings = check_pricing(invoice, context)
+
+        assert codes(findings) == [FindingCode.PRICE_MISMATCH]
+        assert findings[0].severity == Severity.WARN
+        # The dollar impact, not just the per-unit gap: 4 × $50.
+        assert "200.00" in findings[0].message
+        # The words printed on the document, so a reviewer can find the line.
+        assert "rush order" in findings[0].message
+
+    def test_an_undercharge_is_recorded_but_does_not_escalate(self, context):
+        """Below catalog is either a discount or a mistake in our favour. Neither is a
+        reason to hold up a payment."""
+        invoice = Invoice(line_items=[line("WidgetA", 4, "200.00")])
+        findings = check_pricing(invoice, context)
+
+        assert codes(findings) == [FindingCode.PRICE_MISMATCH]
+        assert findings[0].severity == Severity.INFO
+
+    def test_a_converted_price_gets_a_band(self, context):
+        """INV-1014 bills WidgetB at EUR 475, which is $517.75 against a catalog price
+        of $500. The rate we hold is a snapshot and the vendor priced on theirs; 3.6%
+        between them is noise, not a different price."""
+        invoice = Invoice(
+            currency="EUR", line_items=[line("WidgetB", 6, "475.00")]
+        )
+        assert check_pricing(invoice, context) == []
+
+    def test_a_converted_price_can_still_be_wrong(self, context):
+        """The band absorbs exchange-rate drift, not a genuine overcharge."""
+        invoice = Invoice(
+            currency="EUR", line_items=[line("WidgetB", 6, "700.00")]
+        )
+        findings = check_pricing(invoice, context)
+
+        assert codes(findings) == [FindingCode.PRICE_MISMATCH]
+        assert findings[0].severity == Severity.WARN
+
+    def test_a_usd_invoice_gets_no_band(self, context):
+        """No conversion happened, so there is nothing to absorb."""
+        invoice = Invoice(currency="USD", line_items=[line("WidgetA", 1, "260.00")])
+        assert codes(check_pricing(invoice, context)) == [FindingCode.PRICE_MISMATCH]
+
+    def test_an_unresolved_item_is_left_to_the_stock_check(self, context):
+        """No catalog entry means no price to compare against. The unknown item is
+        already reported; a second voice saying so helps nobody."""
+        invoice = Invoice(
+            line_items=[
+                LineItem(raw_name="WidgetC", item=None, quantity=3, unit_price="350.00")
+            ]
+        )
+        assert check_pricing(invoice, context) == []
+
+    def test_an_unreadable_price_is_left_to_the_integrity_check(self, context):
+        invoice = Invoice(
+            line_items=[
+                LineItem(raw_name="WidgetA", item="WidgetA", quantity=3, unit_price=None)
+            ]
+        )
+        assert check_pricing(invoice, context) == []
+
+    def test_an_item_with_no_catalog_price_is_skipped(self, context):
+        """FakeItem exists in inventory with no price. Nothing to compare."""
+        invoice = Invoice(line_items=[line("FakeItem", 1, "999.00")])
+        assert check_pricing(invoice, context) == []
 
 
 class TestStock:

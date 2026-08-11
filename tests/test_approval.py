@@ -101,16 +101,39 @@ class TestTheDecisionRecord:
 
         assert "R1" in decision.policy_refs
 
-    def test_blocking_labels_lead_the_rationale(self):
-        """A reviewer opening a held invoice needs to know why it is in their queue
-        before they need the narrative."""
+    def test_blocking_labels_are_kept_apart_from_the_narrative(self):
+        """A reviewer scanning a queue wants the labels and a reviewer opening one
+        invoice wants the prose. Glued into one string, neither reads well."""
         inv = invoice("50000.00")
         client = FakeLLM(verdict(rationale="Ordinary hardware order."))
 
         decision = decide(client, invoice=inv, findings=[], policy=evaluate(inv, []))
 
-        assert decision.rationale.startswith("[Over $10,000")
-        assert "Ordinary hardware order." in decision.rationale
+        assert decision.concerns[0].startswith("Over $10,000")
+        assert decision.rationale == "Ordinary hardware order."
+
+    def test_rules_lead_the_models_own_concerns(self):
+        """The rules bound the outcome; the model's concerns are discretionary."""
+        inv = invoice("50000.00")
+        client = FakeLLM(verdict(concerns=["Vendor address missing"]))
+
+        decision = decide(client, invoice=inv, findings=[], policy=evaluate(inv, []))
+
+        assert decision.concerns[0].startswith("Over $10,000")
+        assert decision.concerns[-1] == "Vendor address missing"
+
+    def test_a_reason_restated_by_the_model_is_not_listed_twice(self):
+        """The model routinely paraphrases a rule label back. The same reason twice
+        reads like two problems."""
+        inv = invoice("50000.00")
+        client = FakeLLM(
+            verdict(concerns=["over $10,000 — VP approval required", "Unknown vendor"])
+        )
+
+        decision = decide(client, invoice=inv, findings=[], policy=evaluate(inv, []))
+
+        assert len(decision.concerns) == 2
+        assert decision.concerns[-1] == "Unknown vendor"
 
     def test_risk_is_the_higher_of_the_two(self):
         inv = invoice("50000.00")  # R1 floor is 30

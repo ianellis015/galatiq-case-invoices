@@ -1,0 +1,240 @@
+/*
+ * The dashboard.
+ *
+ * Two columns: what has not been dealt with, and what has. The inbox is narrow because
+ * its rows are short; the queue is wide because its cards carry an amount worth reading.
+ */
+
+.intro {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 24px;
+  flex-wrap: wrap;
+  margin-bottom: 28px;
+}
+
+/* The reference date for the due-date checks. Deliberately quiet — it has a sensible
+   default and most runs never touch it — but present, because a run made against the
+   wrong day produces findings that look like nonsense. */
+.asOf {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  flex: none;
+}
+
+.asOfLabel {
+  font-size: 11px;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+.asOfInput {
+  font: inherit;
+  font-size: 13px;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 7px 10px;
+  color-scheme: dark;
+}
+
+.asOfInput:hover:not(:disabled) {
+  border-color: var(--border-strong);
+}
+
+.asOfInput:disabled {
+  opacity: 0.5;
+}
+
+.title {
+  font-size: 26px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  margin: 0;
+}
+
+.subtitle {
+  font-size: 15px;
+  color: var(--text-dim);
+  margin: 8px 0 0;
+  max-width: 68ch;
+  line-height: 1.55;
+}
+
+.error {
+  padding: 12px 16px;
+  border: 1px solid rgba(248, 113, 113, 0.3);
+  border-radius: var(--radius-sm);
+  color: var(--denied);
+  font-size: 14px;
+  margin-bottom: 20px;
+}
+
+/* When a critic disagrees with another agent. One line, and only while it is happening —
+   the most interesting event in a run, and otherwise invisible. */
+.activity {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 11px 16px;
+  margin-bottom: 20px;
+
+  background: var(--working-dim);
+  border: 1px solid rgba(96, 165, 250, 0.25);
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  color: var(--text-dim);
+}
+
+.activityRoute {
+  color: var(--working);
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.activityReason {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.columns {
+  display: grid;
+  grid-template-columns: 380px 1fr;
+  gap: 24px;
+  align-items: start;
+}
+
+.panel {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+.panelHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 16px 16px 14px;
+  border-bottom: 1px solid var(--border);
+}
+
+.panelTitle {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.count {
+  font-size: 12px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: var(--radius-pill);
+  background: var(--surface-raised);
+  color: var(--text-dim);
+}
+
+/* Scrolls independently of the page — the queue beside it is much taller, and an inbox
+   that scrolled with it would leave the "Review all" button somewhere off-screen.
+   The slim grey scrollbar comes from `.scroll-slim` in globals.css. */
+.inboxList {
+  list-style: none;
+  margin: 0;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-height: 720px;
+  overflow-y: auto;
+  /* Reaching the end of this list should stop, not start scrolling the page behind it. */
+  overscroll-behavior: contain;
+}
+
+.queueHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+  margin-bottom: 16px;
+}
+
+.queueTitle {
+  font-size: 17px;
+  font-weight: 600;
+}
+
+.filters {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.filter {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 13px;
+  padding: 6px 13px;
+  border-radius: var(--radius-pill);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  transition: background 160ms var(--ease), color 160ms var(--ease);
+}
+
+.filter:hover {
+  background: var(--surface-hover);
+}
+
+.filter[data-active="true"] {
+  background: #f5f5f5;
+  color: #0a0a0a;
+  border-color: #f5f5f5;
+  font-weight: 500;
+}
+
+.filterCount {
+  opacity: 0.55;
+  font-variant-numeric: tabular-nums;
+}
+
+.cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: 16px;
+}
+
+.empty {
+  padding: 48px 24px;
+  text-align: center;
+  color: var(--text-faint);
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+.emptyStrong {
+  color: var(--text-dim);
+  font-size: 15px;
+  display: block;
+  margin-bottom: 6px;
+}
+
+@media (max-width: 1000px) {
+  .columns {
+    grid-template-columns: 1fr;
+  }
+
+  .inboxList {
+    max-height: none;
+  }
+}

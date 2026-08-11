@@ -1,0 +1,156 @@
+/*
+ * Reading an invoice yourself.
+ *
+ * The document is the point of this page, so it gets the width. The decision panel is
+ * beside it, and it says plainly that nothing has been checked — approving here skips
+ * every stock, arithmetic and fraud check the agents would have run, and somebody doing
+ * that should know they are doing it.
+ */
+
+.back {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--text-dim);
+  margin-bottom: 24px;
+}
+
+.back:hover {
+  color: var(--text);
+}
+
+.head {
+  margin-bottom: 24px;
+}
+
+.name {
+  font-size: 22px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  margin: 0;
+}
+
+.sub {
+  font-size: 14px;
+  color: var(--text-faint);
+  margin: 4px 0 0;
+}
+
+.columns {
+  display: grid;
+  grid-template-columns: 1fr 320px;
+  gap: 24px;
+  align-items: start;
+}
+
+.document {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+.documentHead {
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+.text {
+  margin: 0;
+  padding: 20px;
+  font-family: var(--font-geist-mono), ui-monospace, monospace;
+  font-size: 13px;
+  line-height: 1.75;
+  color: var(--text-dim);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 620px;
+  overflow-y: auto;
+}
+
+.unreadable {
+  padding: 40px 20px;
+  text-align: center;
+  color: var(--denied);
+  font-size: 14px;
+}
+
+.panel {
+  position: sticky;
+  top: 88px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 20px;
+}
+
+.panelTitle {
+  font-size: 15px;
+  font-weight: 600;
+  margin: 0 0 6px;
+}
+
+.panelText {
+  font-size: 13px;
+  color: var(--text-dim);
+  line-height: 1.6;
+  margin: 0 0 16px;
+}
+
+/* Not a warning for its own sake. Approving from here genuinely skips every check, and
+   a person should be told once, plainly, rather than discovering it afterwards. */
+.caution {
+  padding: 12px 14px;
+  border-radius: var(--radius-sm);
+  background: var(--review-dim);
+  border: 1px solid rgba(251, 191, 36, 0.25);
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--review);
+  margin-bottom: 18px;
+}
+
+.actions {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+}
+
+.actions .btn {
+  width: 100%;
+  padding: 11px;
+}
+
+.divider {
+  margin: 18px 0;
+  border: 0;
+  border-top: 1px solid var(--border);
+}
+
+.error {
+  font-size: 13px;
+  color: var(--denied);
+  margin-bottom: 12px;
+}
+
+.state {
+  padding: 60px 20px;
+  text-align: center;
+  color: var(--text-faint);
+  font-size: 14px;
+}
+
+@media (max-width: 940px) {
+  .columns {
+    grid-template-columns: 1fr;
+  }
+
+  .panel {
+    position: static;
+  }
+}

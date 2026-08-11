@@ -27,8 +27,8 @@ class Message:
 
     A list of these rather than a system/user pair, because the extraction retry loop
     works by feeding a specific validation error back as another turn. That is
-    multi-turn by construction, and an interface that assumed two messages would need
-    reworking two tickets from now.
+    multi-turn by construction, and an interface that assumed two messages would have
+    had to be torn up the moment the first self-correction loop was wired.
     """
 
     role: Role
@@ -54,10 +54,14 @@ def assistant(content: str) -> Message:
 class LLMResult[T: BaseModel]:
     """A validated response, plus what it cost and who produced it.
 
-    `provider` and `model` are the two ledger columns already waiting for them: "what
-    decided to pay this" has to be a stored fact rather than something inferred from
-    whose machine the batch ran on. The timing and token counts are for the
-    observability phase.
+    `provider` and `model` map onto two ledger columns: "what decided to pay this" has
+    to be a stored fact rather than something inferred from whose machine the batch ran
+    on.
+
+    The token counts are captured on every call and nothing currently totals them. I
+    carry them anyway because the provider returns them for free, and a cost figure
+    reconstructed later from a billing dashboard is not the same evidence as one the
+    run reported itself.
     """
 
     value: T

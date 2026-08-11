@@ -251,3 +251,81 @@ class TestBatchReport:
 
         assert "already paid" in result.output
         assert "Duplicate payments avoided" in result.output
+
+    def test_a_rejection_with_no_findings_still_states_a_reason(self, stubbed):
+        """INV-1004 passes every deterministic check and is refused on the approver's
+        judgement about a fictional vendor address. The row used to print blank — a
+        rejection with no stated reason, in a tool whose claim is that every decision
+        is explicable."""
+        stubbed["records"] = [
+            record(
+                "invoice_1004.json",
+                outcome=Outcome.REJECTED,
+                invoice_number="INV-1004",
+                findings=[],
+                concerns=["Vendor address is a famous fictional address"],
+            )
+        ]
+
+        result = runner.invoke(
+            cli.app, [f"--invoice_path={INVOICES}", "--no-interactive"]
+        )
+
+        # Truncated to the terminal width, so the assertion is on the opening of the
+        # concern rather than the whole of it.
+        assert "Vendor address" in result.output
+
+
+class TestPreventedTotal:
+    """The headline business number, and the one worth being conservative about."""
+
+    def test_one_invoice_arriving_twice_is_counted_once(self, stubbed):
+        """INV-1013 is rejected as JSON and as a PDF, but only one payment could ever
+        have happened — the ledger's UNIQUE constraint guarantees it. Counting both
+        inflated the figure by $22,562.80 on the provided corpus."""
+        stubbed["records"] = [
+            record(
+                "invoice_1013.json",
+                outcome=Outcome.REJECTED,
+                invoice_number="INV-1013",
+                usd_total="22562.80",
+            ),
+            record(
+                "invoice_1013.pdf",
+                outcome=Outcome.REJECTED,
+                invoice_number="INV-1013",
+                usd_total="22562.80",
+            ),
+        ]
+
+        result = runner.invoke(
+            cli.app, [f"--invoice_path={INVOICES}", "--no-interactive"]
+        )
+
+        assert "$22,562.80" in result.output
+        assert "$45,125.60" not in result.output
+
+    def test_a_negative_total_does_not_subtract(self, stubbed):
+        """INV-1009 states a total of -$250. Preventing it did not save minus two
+        hundred and fifty dollars."""
+        stubbed["records"] = [
+            record(
+                "invoice_1002.txt",
+                outcome=Outcome.REJECTED,
+                invoice_number="INV-1002",
+                usd_total="15000.00",
+            ),
+            record(
+                "invoice_1009.json",
+                outcome=Outcome.REJECTED,
+                invoice_number="INV-1009",
+                usd_total="-250.00",
+            ),
+        ]
+
+        result = runner.invoke(
+            cli.app, [f"--invoice_path={INVOICES}", "--no-interactive"]
+        )
+
+        assert "$15,000.00" in result.output
+        assert "$14,750.00" not in result.output

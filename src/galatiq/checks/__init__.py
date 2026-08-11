@@ -9,9 +9,9 @@ Every check has the same shape:
 
     (Invoice, CheckContext) -> list[Finding]
 
-Uniformity is what makes the fan-out possible -- seven nodes with one signature, wired
-by a loop and merged by one reducer. Seven functions each taking something different
-would need seven pieces of glue.
+Uniformity is what makes the fan-out possible -- eight nodes with one signature, wired
+by a loop and merged by one reducer. Eight functions each taking something different
+would need eight pieces of glue.
 
 Checks report; they do not decide. A CRITICAL finding is a statement about the invoice,
 not a verdict on it. Whether one means rejection is the policy engine's question, and
@@ -34,7 +34,7 @@ class CheckContext:
 
     A snapshot rather than a live database handle, for three reasons. Checks become
     pure functions of explicit data, so a test constructs one in three lines instead of
-    seeding a database. Seven concurrent reads become one. And the snapshot travels in
+    seeding a database. Eight concurrent reads become one. And the snapshot travels in
     the checkpointed state, so the audit trail can answer "what stock did we see when we
     rejected this?" rather than "what does stock say now, months later".
 
@@ -114,7 +114,7 @@ Check = Callable[[Invoice, CheckContext], list[Finding]]
 def run_check(name: str, check: Check, invoice: Invoice, context: CheckContext) -> list[Finding]:
     """Run one check behind an exception boundary.
 
-    A bug in one check must not take down the other six or fail the batch. The failure
+    A bug in one check must not take down the other seven or fail the batch. The failure
     becomes a finding like any other, so it reaches the same reviewer through the same
     channel -- and an invoice whose stock check crashed is one a human should look at,
     not one that quietly skipped a step.
@@ -146,10 +146,12 @@ def all_checks() -> dict[str, Check]:
     from galatiq.checks.duplicates import check_duplicates
     from galatiq.checks.fraud import check_fraud
     from galatiq.checks.integrity import check_integrity
+    from galatiq.checks.pricing import check_pricing
     from galatiq.checks.stock import check_stock
 
     return {
         "check_stock": check_stock,
+        "check_pricing": check_pricing,
         "check_arithmetic": check_arithmetic,
         "check_integrity": check_integrity,
         "check_duplicates": check_duplicates,

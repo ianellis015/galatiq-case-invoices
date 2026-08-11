@@ -29,7 +29,9 @@ class TestRulesLoad:
     def test_the_shipped_rules_parse(self):
         rules = load_rules()
 
-        assert [r.id for r in rules] == ["R1", "R2", "R3", "R4", "R5", "R6", "R7"]
+        assert [r.id for r in rules] == [
+            "R1", "R2", "R3", "R4", "R5", "R6", "R7", "R8"
+        ]
 
     def test_every_rule_names_a_real_predicate(self):
         for rule in load_rules():
@@ -175,6 +177,28 @@ class TestFindingsDriveOutcomes:
         assert {"R1", "R2", "R4"} <= set(outcome.policy_refs)
 
 
+class TestPricingRule:
+    """R8. An overcharge is a question for a person, not a refusal."""
+
+    def test_an_overcharge_is_held(self):
+        outcome = evaluate(
+            usd("7185.00"), [finding(FindingCode.PRICE_MISMATCH, Severity.WARN)]
+        )
+
+        assert outcome.outcome is Outcome.HELD_FOR_REVIEW
+        assert "R8" in outcome.policy_refs
+
+    def test_an_undercharge_changes_nothing(self):
+        """A vendor billing below catalog is honouring a discount or has made a mistake
+        in our favour. Holding the payment would be the wrong response to both."""
+        outcome = evaluate(
+            usd("7185.00"), [finding(FindingCode.PRICE_MISMATCH, Severity.INFO)]
+        )
+
+        assert outcome.outcome is Outcome.APPROVED
+        assert "R8" not in outcome.policy_refs
+
+
 class TestBlockingLabels:
     def test_only_reasons_that_changed_the_outcome(self):
         """A held invoice should lead with why it is held, not with every note that
@@ -185,6 +209,20 @@ class TestBlockingLabels:
             "Potential fraud detected — review before paying"
         ]
         assert len(outcome.labels) == 2  # the structuring warning is recorded too
+
+    def test_the_reason_it_was_rejected_leads(self):
+        """R1 is written above R2 in the yaml, which is a fact about the file and not
+        about the invoice. A $15,000 order with a stock breach was rejected by the
+        stock, and that is what a reviewer must read first."""
+        outcome = evaluate(
+            usd("15000.00"), [finding(FindingCode.STOCK_EXCEEDED, Severity.CRITICAL)]
+        )
+
+        assert outcome.outcome is Outcome.REJECTED
+        assert outcome.blocking_labels == [
+            "Critical validation failure",
+            "Over $10,000 — VP approval required",
+        ]
 
 
 class TestTheInterlock:

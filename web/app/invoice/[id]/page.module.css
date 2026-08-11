@@ -1,0 +1,294 @@
+/*
+ * One decision, in full.
+ *
+ * The same page whether the invoice is waiting for you or already settled. What changes
+ * is what it asks: a decided invoice explains itself, and a held one explains itself and
+ * then puts two buttons under it.
+ */
+
+.back {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--text-dim);
+  margin-bottom: 24px;
+}
+
+.back:hover {
+  color: var(--text);
+}
+
+.head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 24px;
+  flex-wrap: wrap;
+  margin-bottom: 28px;
+}
+
+.identity {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  min-width: 0;
+}
+
+.avatar {
+  width: 46px;
+  height: 46px;
+  border-radius: 50%;
+  flex: none;
+  display: grid;
+  place-items: center;
+  font-size: 14px;
+  font-weight: 600;
+  background: var(--surface-raised);
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+}
+
+.vendor {
+  font-size: 22px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  margin: 0;
+}
+
+.number {
+  font-size: 14px;
+  color: var(--text-faint);
+  margin: 3px 0 0;
+}
+
+.headRight {
+  text-align: right;
+}
+
+.amount {
+  font-size: 30px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  margin-top: 10px;
+}
+
+.columns {
+  display: grid;
+  grid-template-columns: 1fr 320px;
+  gap: 24px;
+  align-items: start;
+}
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 20px;
+  margin-bottom: 20px;
+}
+
+.cardHead {
+  font-size: 12px;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+  margin: 0 0 12px;
+}
+
+/* The short reasons, before the prose. Left rule rather than bullets: it groups them as
+   one block at a glance, and a reviewer deciding whether to read further only needs the
+   block. */
+.concerns {
+  list-style: none;
+  margin: 0 0 18px;
+  padding: 0 0 0 14px;
+  border-left: 2px solid var(--review);
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.concern {
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 1.45;
+  color: var(--review);
+}
+
+/* 68 characters is about as wide as a line can get before the eye loses its place
+   coming back to the left margin. The card is wider than that; the text is not. */
+.rationale {
+  max-width: 68ch;
+  color: var(--text-dim);
+}
+
+.rationale p {
+  font-size: 15px;
+  line-height: 1.75;
+  margin: 0 0 0.9em;
+}
+
+.rationale p:last-child {
+  margin-bottom: 0;
+}
+
+/* The opening paragraph carries the conclusion, so it reads as the answer and the rest
+   as the working. */
+.rationale p:first-child {
+  color: var(--text);
+}
+
+/* The raw failure. Monospaced because it is a machine's words, not a person's. */
+.failure {
+  margin: 14px 0 0;
+  padding: 12px 14px;
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  font-family: var(--font-geist-mono), ui-monospace, monospace;
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--text-dim);
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-x: auto;
+}
+
+.rules {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+}
+
+.rule {
+  font-size: 12px;
+  padding: 3px 9px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-raised);
+  color: var(--text-dim);
+}
+
+/* The decision, when it is still yours to make. Sticky so it stays reachable while
+   reading the findings — a decision panel you have to scroll back up to find is one
+   people make from memory. */
+.decide {
+  position: sticky;
+  top: 88px;
+  background: var(--surface);
+  border: 1px solid rgba(251, 191, 36, 0.35);
+  border-radius: var(--radius);
+  padding: 20px;
+}
+
+.decideTitle {
+  font-size: 15px;
+  font-weight: 600;
+  margin: 0 0 6px;
+}
+
+.decideText {
+  font-size: 13px;
+  color: var(--text-dim);
+  line-height: 1.6;
+  margin: 0 0 18px;
+}
+
+.decideActions {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+}
+
+.decideActions .btn {
+  width: 100%;
+  padding: 11px;
+}
+
+.settled {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 20px;
+}
+
+.facts {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.fact {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 13px;
+}
+
+.factLabel {
+  color: var(--text-faint);
+  flex: none;
+}
+
+.factValue {
+  color: var(--text-dim);
+  text-align: right;
+  overflow-wrap: anywhere;
+}
+
+.table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 14px;
+}
+
+.table th {
+  text-align: left;
+  font-weight: 500;
+  font-size: 12px;
+  color: var(--text-faint);
+  padding: 0 12px 10px 0;
+}
+
+.table td {
+  padding: 10px 12px 10px 0;
+  border-top: 1px solid var(--border);
+  vertical-align: top;
+}
+
+.table td:last-child,
+.table th:last-child {
+  text-align: right;
+  padding-right: 0;
+}
+
+.rawName {
+  display: block;
+  font-size: 12px;
+  color: var(--text-faint);
+  margin-top: 2px;
+}
+
+.unknown {
+  color: var(--denied);
+}
+
+.state {
+  padding: 60px 20px;
+  text-align: center;
+  color: var(--text-faint);
+  font-size: 14px;
+}
+
+@media (max-width: 940px) {
+  .columns {
+    grid-template-columns: 1fr;
+  }
+
+  .decide {
+    position: static;
+  }
+}
