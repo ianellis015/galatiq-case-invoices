@@ -198,6 +198,23 @@ npm run dev
 
 Then open **http://localhost:3000**.
 
+### What it looks like
+
+![The inbox on a fresh start: twenty documents waiting, each reviewable by you or by the agents, and an empty review queue](docs/screenshots/01-inbox.png)
+
+*A fresh start. Twenty documents in the inbox, each one reviewable either way, and an
+empty queue on the right.*
+
+![Inbox rows mid-run, each naming the agent currently working on that document](docs/screenshots/02-agents-working.png)
+
+*Mid-run. Each row names the step it is on — one document with the approver, two with the
+extraction critic.*
+
+![The review queue after a full batch, with each invoice approved, denied, or flagged for a human](docs/screenshots/03-review-queue.png)
+
+*After a batch. Inbox clear, every document settled as approved, denied, or flagged for a
+human — with the reasoning behind each one a click away.*
+
 ### What you can do there
 
 **Three ways to make progress, none of them privileged.** Review an invoice yourself, hand
@@ -275,7 +292,7 @@ flowchart TD
 
     subgraph VALIDATE ["2 · VALIDATION"]
         direction TB
-        PREP --> NORM["<b>Normalizer</b> — <br/><i>line names → catalog items</i>"]
+        PREP --> NORM["normalize — <br/><i>line names → catalog items,</i><br/><i>exact match only</i>"]
         NORM --> C1["check_stock"]
         NORM --> C2["check_pricing"]
         NORM --> C3["check_arithmetic"]
@@ -324,13 +341,15 @@ flowchart TD
 
     classDef agent fill:#1c3a5e,stroke:#60a5fa,stroke-width:2px,color:#e8f0fe
     classDef code fill:#1c2128,stroke:#6b7280,color:#d1d5db
+    classDef hybrid fill:#1c2128,stroke:#6b7280,stroke-dasharray:4 3,color:#d1d5db
     classDef money fill:#14532d,stroke:#4ade80,stroke-width:2px,color:#dcfce7
     classDef stop fill:#3f1d1d,stroke:#f87171,color:#fecaca
     classDef wait fill:#3f3218,stroke:#fbbf24,color:#fde68a
     classDef edge fill:#0d1117,stroke:#8b949e,color:#c9d1d9
 
-    class EXTRACT,ECRIT,NORM,APPROVER,ACRIT agent
+    class EXTRACT,ECRIT,APPROVER,ACRIT agent
     class LOAD,FINAL,PREP,MERGE,RULES,LOCK,C1,C2,C3,C4,C5,C6,C7,C8 code
+    class NORM hybrid
     class PAY money
     class REJ stop
     class HOLD wait
@@ -342,18 +361,23 @@ flowchart TD
     style SETTLE fill:#0d1117,stroke:#30363d,color:#8b949e
 ```
 
-**Blue nodes call a model. Grey nodes are tested Python. Green is the only node that moves
+**Blue nodes are agents. Grey nodes are tested Python. Green is the only node that moves
 money — and it is deterministic code, not an agent.** That division is the architecture.
+The dashed node is `normalize`: deterministic matching with a model fallback, below.
 
-### The five agents
+### The four agents
 
 | Agent | Job | Why an LLM |
 |---|---|---|
 | **Extractor** | Any document → a structured invoice | The only stage where formats are genuinely open-ended |
 | **Extraction critic** | Re-reads the document against the transcription | Catching a misread takes judgement about the source, not a rule |
-| **Normalizer** | `"WidgetA (rush order)"` → `WidgetA` | Resolving the many ways humans write the same product name |
 | **Approver** | Writes the reasoning behind a decision | A reviewer needs an explanation, not a rule id |
 | **Approval critic** | Argues the opposite case | A second, adversarial pass catches what a single pass talks itself into |
+
+`normalize` is not one of them. Turning `"WidgetA (rush order)"` into `WidgetA` is a
+lookup, not a judgement: strip qualifiers, punctuation and spacing, then require an exact
+match on the catalog. Leftovers get one model call per invoice, and an answer naming
+anything not in the catalog is discarded — no loop, no critic, no say in any outcome.
 
 ### The interlock
 
@@ -373,6 +397,12 @@ exhaustive 3×3 matrix of rule outcome against model outcome.
 Most of these come back to the same question. When one option is more capable and the
 other is more predictable, which one belongs in the path of a payment? The answers below
 consistently favour predictability, and each one names what that cost.
+
+**The model call is the one thing that leaves the machine.**
+The brief asks for Grok *and* for no internet; both can't hold, so I took the live API
+because the reasoning is the part worth judging. Everything else runs locally as scoped —
+database, ledger, mock payment, audit trail, dashboard — and the tests need no key and no
+network.
 
 **The model reads and explains; code decides.**
 The model could compute a subtotal or compare a stock level, and would usually get it
